@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>屏幕时间仪表盘 · Lieflat Mono</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@6/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ══ MONO tokens（mono-tokens.js 内联，值的唯一正本）══ */
+/* PALM 预设（color-presets.js）：绿黄低饱和 + 琥珀唯一强调 */
+:root{--bg:#F0EFEB;--ink:#58402E;--muted:rgba(88,64,46,.60);--faint:rgba(88,64,46,.32);
+      --grid:rgba(88,64,46,.16);--hero:#D4A017;--data:#43593B}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);font-family:'Inter','Segoe UI','Microsoft YaHei',sans-serif;color:var(--ink);
+     padding:34px;-webkit-font-smoothing:antialiased}
+svg text{font-family:'Inter','Microsoft YaHei',sans-serif}
+.pop{transform-box:fill-box;transform-origin:center;animation:pop .5s cubic-bezier(.2,.7,.3,1.3) both}
+@keyframes pop{from{transform:scale(0)}to{transform:none}}
+.fade{animation:fade .9s ease both}
+@keyframes fade{from{opacity:0}}
+.draw{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1s cubic-bezier(.4,0,.2,1) both}
+@keyframes draw{to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion:reduce){.pop,.fade{animation:none}.draw{animation:none;stroke-dasharray:none;stroke-dashoffset:0}}
+
+/* ══ 页面骨架（卡片语法来自 tokens，页面件按同 token 造句）══ */
+.page{max-width:1180px;margin:0 auto}
+header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+h1{font-size:19px;font-weight:700;letter-spacing:-.02em}
+.tabs{display:flex;gap:6px}
+.tabs button{border:none;background:transparent;color:var(--muted);padding:5px 12px;border-radius:99px;
+             cursor:pointer;font-size:12px;font-weight:600;font-family:inherit}
+.tabs button.active{background:var(--ink);color:var(--bg)}
+.kpis{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+.kpi{flex:1;min-width:170px}
+.kpi .k{font-size:11px;color:var(--muted);margin-bottom:3px}
+.kpi .v{font-size:24px;font-weight:800;letter-spacing:-.02em}
+.kpi .s{font-size:11px;color:var(--faint);margin-top:2px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:22px}
+@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+.card{border-radius:24px;padding:28px 28px 20px}
+.card+.card,.kpis+.grid2,.grid2+.card,.card+.kpis{margin-top:0}
+.grid2 .card{background:rgba(255,255,255,.52)}
+.card.wide{background:rgba(255,255,255,.52)}
+h2{font-weight:700;font-size:16.5px;letter-spacing:-.02em;margin-bottom:3px}
+.sub{font-size:11.5px;color:var(--muted);margin-bottom:14px}
+.src{font-size:9.5px;color:var(--faint);margin-top:10px;letter-spacing:.08em;font-weight:500;text-transform:uppercase}
+.ch{height:320px}
+.wrap{position:relative;height:300px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 4px 0 10px;vertical-align:middle}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--grid)}
+td{padding:7px 8px;border-bottom:1px solid rgba(88,64,46,.12)}
+tr:hover td{background:rgba(88,64,46,.05)}
+.legend{font-size:11.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>屏幕时间 · 一周全景</h1>
+    <div class="tabs" id="tabs"></div>
+  </header>
+
+  <div class="kpis">
+    <div class="kpi"><div class="k">当日使用时长</div><div class="v" id="kTotal">—</div></div>
+    <div class="kpi"><div class="k">最常用</div><div class="v" id="kTop">—</div></div>
+    <div class="kpi"><div class="k">内容记录（≥1 分钟）</div><div class="v" id="kContent">—</div></div>
+    <div class="kpi"><div class="k">有效 / 娱乐 占比</div><div class="v" id="kProd">—</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 id="tApp">—</h2>
+      <div class="sub" id="sApp">—</div>
+      <div class="wrap"><canvas id="appbars"></canvas></div>
+      <div class="src">Chunky Bars (horizontal) · screen time · local events db</div>
+    </div>
+    <div class="card">
+      <h2 id="tDonut">—</h2>
+      <div class="sub">one tick = 1% of screen time · reads like a clock</div>
+      <svg id="donut" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="src">Tick Donut · effectiveness · local events db</div>
+    </div>
+  </div>
+
+  <div class="card wide">
+    <h2 id="tTl">—</h2>
+    <div class="sub legend" id="sTl">—</div>
+    <svg id="timeline" viewBox="0 0 1000 175" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="src">Time Span · library-extended on G3 grammar · local events db</div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 id="tWaffle">—</h2>
+      <div class="sub">every dot = 1% of screen time · one shade per category</div>
+      <svg id="waffle" viewBox="0 0 380 300" width="100%" style="max-height:320px"></svg>
+      <div class="src">Dot Waffle · categories · local events db</div>
+    </div>
+    <div class="card">
+      <h2 id="tWeek">—</h2>
+      <div class="sub">one dot = one day · hollow = weekend · hours of screen time</div>
+      <svg id="weekline" viewBox="0 0 400 320" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="src">Hairline Line · 7 days · local events db</div>
+    </div>
+  </div>
+
+  <div class="card wide">
+    <h2 id="tPunch">—</h2>
+    <div class="sub">activity per hour · each row is its own day · dot area = minutes</div>
+    <div class="ch" id="punch" style="height:340px"></div>
+    <div class="src">Single Axis · 7 days × 24 hours · local events db</div>
+  </div>
+
+  <div class="card wide">
+    <h2 id="tContent">内容明细</h2>
+    <div class="sub">≥1 分钟的内容 · 抖音客户端与浏览器页面合并 · 随上方日期切换</div>
+    <table>
+      <thead><tr><th style="width:96px">时间</th><th style="width:80px">时长</th><th style="width:150px">应用</th><th>内容</th></tr></thead>
+      <tbody id="contentBody"></tbody>
+    </table>
+    <div class="src">Content ledger · screen time · local events db</div>
+  </div>
+</div>
+
+<script>
+/* ── PALM 预设（内联自 color-presets.js；字体/圆角/动画仍用 mono-tokens）── */
+const INK='#58402E',PAPER='#F0EFEB',MUTED='rgba(88,64,46,.60)',FAINT='rgba(88,64,46,.32)',GRID='rgba(88,64,46,.16)';
+const C_DATA='#43593B',C_HERO='#D4A017',C_MID='#929960',C_FAINT='#ACAD79';
+/* 序数梯：深绿 → 麦黄，用于排名/单序列 */
+const L=['#43593B','#5A7049','#77835A','#929960','#ACAD79','#F2D17E'];
+/* 类目固定映射：娱乐 = 唯一琥珀（全页唯一的强调色）*/
+const CATFIX={'娱乐':'#D4A017','浏览网页':'#43593B','工作':'#5A7049',
+              '未分类':'#ACAD79','社交通讯':'#929960','系统':'#F2D17E'};
+const CATFALLBACK=['#43593B','#5A7049','#77835A','#929960','#ACAD79','#F2D17E','#58402E'];
+const LAD=['#43593B','#5A7049','#77835A','#929960','#ACAD79'];
+const tipLight={backgroundColor:INK,borderWidth:0,textStyle:{color:PAPER,fontFamily:'Inter',fontSize:12},padding:[10,14]};
+const D2R=Math.PI/180;
+const pol=(cx,cy,r,deg)=>[cx+r*Math.cos(deg*D2R),cy+r*Math.sin(deg*D2R)];
+const rnd=(i,k)=>Math.abs(((i*73856093)^(k*19349663))%1000)/1000;
+const NS='http://www.w3.org/2000/svg';
+const el=(p,t,a)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);p.appendChild(n);return n};
+const txt=(p,a,s)=>{const n=el(p,'text',a);n.textContent=s;return n};
+const tip=(n,s)=>{const t=document.createElementNS(NS,'title');t.textContent=s;n.appendChild(t)};
+const timers={};
+const keep=(id,t)=>{(timers[id]=timers[id]||[]).push(t)};
+const obsReveal=(id,fn)=>{
+  const dom=document.getElementById(id);
+  const go=()=>{(timers[id]||[]).forEach(clearInterval);timers[id]=[];fn(dom)};
+  const io=new IntersectionObserver(es=>{if(es[0].isIntersecting){go();io.disconnect()}},{threshold:.35});
+  io.observe(dom); dom.style.cursor='pointer'; dom.addEventListener('click',go);
+};
+const eReveal=(id,opt)=>obsReveal(id,dom=>{
+  const g=echarts.getInstanceByDom(dom)||echarts.init(dom); g.clear(); g.setOption(opt);
+});
+const cReveal=(id,mk)=>obsReveal(id,dom=>{ cReveal.c?.[id]?.destroy(); (cReveal.c=cReveal.c||{})[id]=new Chart(dom,mk()); });
+
+Chart.defaults.color=MUTED;
+Chart.defaults.font.family="'Inter','Microsoft YaHei',sans-serif";
+Chart.defaults.font.size=10.5;
+Chart.defaults.borderColor=GRID;
+Chart.defaults.plugins.legend.display=false;
+Chart.defaults.plugins.tooltip.backgroundColor=INK;
+Chart.defaults.plugins.tooltip.titleColor='#F0EFEB';
+Chart.defaults.plugins.tooltip.bodyColor='#A5A49E';
+Chart.defaults.plugins.tooltip.padding=12;
+Chart.defaults.plugins.tooltip.cornerRadius=12;
+Chart.defaults.plugins.tooltip.displayColors=false;
+
+/* ── 数据 ── */
+const DATA = /*__DATA__*/null;
+
+/* ── 工具 ── */
+const fmtH=ms=>(ms/3600000).toFixed(1)+'h';
+function hundredSplit(obj){          // 占比 → 100 个诚实点（大数取整）
+  const sum=Object.values(obj).reduce((a,b)=>a+b,0)||1;
+  let parts=Object.entries(obj).map(([k,v])=>[k,Math.floor(v/sum*100),v/sum*100]);
+  let left=100-parts.reduce((a,[,f])=>a+f,0);
+  parts.sort((a,b)=>b[2]-a[2]);
+  for(let i=0;i<left;i++) parts[i][1]++;
+  return parts.map(([k,v])=>[k,v]);
+}
+function catShades(day){             // 类目 → 固定色（palm：色相=类目，跨日稳定）
+  const m={}; let k=0;
+  DATA.data[day].by_cat.forEach(([c])=>{
+    m[c]=CATFIX[c]||CATFALLBACK[k++%CATFALLBACK.length];
+  });
+  return m;
+}
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+/* ── 1 · Chunky Bars（横向 · G3 语法）── */
+let appChart=null;
+function renderAppBars(day){
+  const d=DATA.data[day];
+  const labels=d.by_app.map(x=>x[0].length>16?x[0].slice(0,15)+'…':x[0]);
+  const vals=d.by_app.map(x=>+(x[1]/3600000).toFixed(2));
+  const full=d.by_app.map(x=>x[0]);
+  const shades=labels.map((_,i)=>L[Math.min(i,5)]);
+  if(appChart) appChart.destroy();
+  appChart=new Chart(document.getElementById('appbars'),{
+    type:'bar',
+    data:{labels,datasets:[{data:vals,backgroundColor:shades,
+      borderRadius:{topRight:99,bottomRight:99},borderSkipped:false,barPercentage:.6}]},
+    options:{indexAxis:'y',maintainAspectRatio:false,
+      animation:{duration:900,easing:'easeOutQuart',delay:c=>c.dataIndex*100},
+      plugins:{tooltip:{callbacks:{
+        title:i=>full[i[0].dataIndex],
+        label:i=>fmtH(d.by_app[i.dataIndex][1])}}},
+      scales:{
+        x:{display:false,suggestedMax:Math.max(...vals,1)*1.18},
+        y:{grid:{display:false},border:{display:false},
+           ticks:{padding:6,font:{size:10,weight:600},autoSkip:false}},
+      }},
+    plugins:[{id:'endValues',afterDatasetsDraw(chart){
+      const{ctx}=chart;
+      chart.getDatasetMeta(0).data.forEach((bar,i)=>{
+        ctx.save();ctx.font='800 11px Inter';ctx.fillStyle=INK;ctx.textAlign='left';
+        ctx.fillText(chart.data.datasets[0].data[i]+'h',bar.x+7,bar.y+4);ctx.restore();
+      });
+    }}],
+  });
+}
+
+/* ── 2 · Tick Donut（有效性 · B4 语法）── */
+function renderDonut(day){
+  const s=document.getElementById('donut'); s.innerHTML='';
+  const d=DATA.data[day];
+  const sum=Object.values(d.prod).reduce((a,b)=>a+b,0)||1;
+  const shades={productive:C_DATA,neutral:C_MID,distracting:C_HERO};
+  const names={productive:'高效',neutral:'中性',distracting:'娱乐'};
+  const D=hundredSplit(d.prod).map(([k,v])=>[names[k],v,shades[k]]);
+  const cx=200,cy=150,R0=64;
+  let k0=0;
+  D.forEach(([name,v,shade],si)=>{
+    for(let k=0;k<v;k++){
+      const idx=k0+k,a=idx*3.6-90,len=10+rnd(idx+1,si+2)*6;
+      const [x1,y1]=pol(cx,cy,R0,a),[x2,y2]=pol(cx,cy,R0+len,a);
+      el(s,'line',{x1,y1,x2,y2,stroke:shade,'stroke-width':1.8,
+        class:'fade',style:`animation-delay:${idx*.012}s`});
+      if(idx%10===0){const[dx,dy]=pol(cx,cy,R0-5,a);
+        el(s,'circle',{cx:dx,cy:dy,r:.8,fill:FAINT,class:'fade',style:`animation-delay:${idx*.012}s`});}
+    }
+    const mid=(k0+v/2)*3.6-90,[lx,ly]=pol(cx,cy,R0+40,mid),[gx,gy]=pol(cx,cy,R0+20,mid);
+    el(s,'line',{x1:gx,y1:gy,x2:lx,y2:ly,stroke:FAINT,'stroke-width':1.2,
+      'stroke-dasharray':'1 3',class:'fade',style:`animation-delay:${.6+si*.1}s`});
+    const anchor=Math.cos(mid*D2R)>.3?'start':Math.cos(mid*D2R)<-.3?'end':'middle';
+    const lab=txt(s,{x:lx,y:ly+3,'font-size':9,'font-weight':800,fill:shade,'text-anchor':anchor,
+      style:`paint-order:stroke;stroke:${PAPER};stroke-width:3px;animation-delay:${.65+si*.1}s`,
+      class:'fade'},`${name} · ${v}`);
+    tip(lab,`${names[Object.keys(shades)[si]]??name} — ${v}%`);
+    k0+=v;
+  });
+  txt(s,{x:cx,y:cy-2,'font-size':22,'font-weight':800,fill:INK,'text-anchor':'middle',
+    class:'fade',style:'animation-delay:.9s'},'100');
+  txt(s,{x:cx,y:cy+14,'font-size':7,'font-weight':600,fill:MUTED,'text-anchor':'middle',
+    'letter-spacing':'.1em',class:'fade',style:'animation-delay:.9s'},'TICKS · ONE = 1%');
+}
+
+/* ── 3 · Time Span（甘特区间 · 库外翻译，继承 G3 横条语法）── */
+function renderTimeline(day){
+  const s=document.getElementById('timeline'); s.innerHTML='';
+  const d=DATA.data[day]; const shades=catShades(day);
+  const X0=46,X1=978,Y=58,H=36;
+  if(!d.timeline.length){
+    txt(s,{x:500,y:84,'font-size':11,'font-weight':600,fill:MUTED,'text-anchor':'middle',
+      class:'fade'},'当日无活动记录');
+    return;
+  }
+  // 只画「有活动的时段」：两端各留 15 分钟余量，不铺满 0–24h
+  let lo=Infinity, hi=-Infinity;
+  d.timeline.forEach(t=>{ lo=Math.min(lo,t.sf); hi=Math.max(hi,t.ef); });
+  const PAD=15/1440;
+  lo=Math.max(0,lo-PAD); hi=Math.min(1,hi+PAD);
+  const span=Math.max(hi-lo,1/24);           // 至少 1 小时，避免极短时段被过度拉伸
+  const xOf=f=>X0+(X1-X0)*(f-lo)/span;
+
+  el(s,'line',{x1:X0,y1:Y+H+9,x2:X1,y2:Y+H+9,stroke:GRID,'stroke-width':1.4,class:'fade'});
+  // 刻度对齐整点：跨度短用 1h，长用 2h
+  const hours=(hi-lo)*24;
+  const step=hours<=6?1:hours<=14?2:3;
+  const startH=Math.ceil(lo*24/step)*step;
+  const endH=Math.floor(hi*24);
+  for(let h=startH;h<=endH;h+=step){
+    const x=xOf(h/24);
+    el(s,'line',{x1:x,y1:Y+H+9,x2:x,y2:Y+H+14,stroke:FAINT,'stroke-width':1.1,class:'fade'});
+    txt(s,{x,y:Y+H+27,'font-size':8,'font-weight':600,fill:MUTED,'text-anchor':'middle',
+      'letter-spacing':'.08em',class:'fade'},String(h%24).padStart(2,'0')+':00');
+  }
+  d.timeline.forEach((t,i)=>{
+    const x=xOf(t.sf), w=Math.max(1.6,(X1-X0)*(t.ef-t.sf)/span);
+    const r=el(s,'rect',{x,y:Y,width:w,height:H,rx:Math.min(8,H/2,w/2),
+      fill:shades[t.cat]||FAINT,class:'fade',style:`animation-delay:${Math.min(i*.01,.9)}s`});
+    tip(r,`${t.s}–${t.e} · ${t.app} · ${t.dur}`+(t.ct?` · ${t.ct}`:''));
+  });
+}
+
+/* ── 4 · Dot Waffle（类别构成 · G4 语法）── */
+function renderWaffle(day){
+  const s=document.getElementById('waffle'); s.innerHTML='';
+  const d=DATA.data[day]; const shades=catShades(day);
+  const sum=d.by_cat.reduce((a,[,v])=>a+v,0)||1;
+  const D=hundredSplit(Object.fromEntries(d.by_cat))
+          .map(([k,v])=>[k,v,shades[k]||FAINT]);
+  const COLS=10,CELL=21,R=7.5,X0=8,Y0=8;
+  let idx=0;
+  D.forEach(([name,v,shade],g)=>{
+    for(let k=0;k<v;k++){
+      const c=idx+k,row=Math.floor(c/COLS),col=c%COLS;
+      el(s,'circle',{cx:X0+col*CELL+R,cy:Y0+row*CELL+R,r:R,fill:shade,
+        class:'pop',style:`animation-delay:${c*.008+g*.05}s`});
+    }
+    idx+=v;
+  });
+  D.forEach(([name,v,shade],g)=>{
+    const y=26+g*40;
+    el(s,'circle',{cx:246,cy:y,r:6,fill:shade});
+    const n=txt(s,{x:260,y:y-1,'font-size':10.5,'font-weight':600,fill:INK},name);
+    tip(n,`${name} — ${(v)}% of screen time`);
+    const val=txt(s,{x:260,y:y+13,'font-size':15,'font-weight':800,fill:g<2?INK:MUTED},v+'%');
+  });
+}
+
+/* ── 5 · Hairline Line（一周趋势 · B2 语法）── */
+function renderWeekLine(){
+  const s=document.getElementById('weekline'); s.innerHTML='';
+  const N=DATA.days.length;
+  const vals=DATA.daily_totals_ms.map(ms=>+(ms/3600000).toFixed(1));
+  const x=i=>40+i*(330/Math.max(N-1,1)),base=258,map=v=>base-v*12.6;
+  for(let i=0;i<N;i++)
+    el(s,'line',{x1:x(i),y1:base,x2:x(i),y2:base-7,stroke:FAINT,'stroke-width':1.1,
+      class:'fade',style:`animation-delay:${i*.02}s`});
+  el(s,'line',{x1:24,y1:base,x2:382,y2:base,stroke:GRID,'stroke-width':1.4,class:'fade'});
+  const top=[];
+  for(const i of [...vals.keys()].sort((a,b)=>vals[b]-vals[a])){
+    if(top.every(t=>Math.abs(t-i)>=2))top.push(i);
+    if(top.length===2)break;
+  }
+  const pts=vals.map((v,i)=>`${x(i)} ${map(v)}`).join(' L ');
+  el(s,'path',{d:'M'+pts,fill:'none',stroke:C_DATA,'stroke-width':1.8,pathLength:1,
+    class:'draw',style:'animation-duration:1.2s'});
+  vals.forEach((v,i)=>{
+    const we=DATA.weekend[i],big=top.includes(i);
+    const dot=el(s,'circle',{cx:x(i),cy:map(v),r:big?4.4:2.8,
+      fill:we?PAPER:(big?L[0]:L[2]),stroke:we?C_DATA:L[0],'stroke-width':we?1.4:0,
+      class:'pop',style:`animation-delay:${.2+i*.06}s`});
+    tip(dot,`${DATA.week_dates[i]} ${DATA.week_labels[i]} — ${v}h`);
+    if(big)txt(s,{x:x(i),y:map(v)-11,'font-size':9.5,'font-weight':800,fill:C_DATA,'text-anchor':'middle',
+      style:`paint-order:stroke;stroke:${PAPER};stroke-width:3px;animation-delay:${1+i*.02}s`,
+      class:'fade'},v+'h');
+  });
+  DATA.week_dates.forEach((dt,i)=>{
+    if(N<=8||i%2===0)
+      txt(s,{x:x(i),y:base+18,'font-size':7.5,'font-weight':600,fill:MUTED,'text-anchor':'middle',
+        'letter-spacing':'.1em',class:'fade'},dt.slice(3));
+  });
+  txt(s,{x:200,y:306,'font-size':7,'font-weight':600,fill:'#B0AFA9','text-anchor':'middle',
+    'letter-spacing':'.12em',class:'fade',style:'animation-delay:1.1s'},
+    'ONE DOT = ONE DAY · HOLLOW = WEEKEND');
+}
+
+/* ── 6 · Single Axis（一周 punch card · G14 语法，点面积∝分钟）── */
+function renderPunch(){
+  const days=DATA.week_labels;
+  const hours=Array.from({length:24},(_,i)=>i);
+  const series=DATA.week_hourly.map((row,di)=>({
+    singleAxisIndex:di,coordinateSystem:'singleAxis',type:'scatter',
+    data:row.map((ms,h)=>ms>0?[h,Math.round(ms/60000)]:null).filter(Boolean),
+    symbolSize:dd=>Math.max(3,Math.sqrt(dd[1])*1.55),
+    itemStyle:{color:DATA.weekend[di]?C_FAINT:L[Math.min(4,di)],
+               opacity:1},
+    animationDelay:di2=>di*160+di2*14,
+  }));
+  eReveal('punch',{
+    animationDuration:500,animationEasing:'backOut',
+    tooltip:{...tipLight,formatter:p=>
+      `${DATA.week_dates[p.seriesIndex]} ${days[p.seriesIndex]} `
+      +`${String(p.value[0]).padStart(2,'0')}:00 — ${p.value[1]} 分钟`},
+    title:days.map((d,i)=>({
+      text:`${d}`,textBaseline:'middle',top:(i+.5)*100/7-1+'%',left:0,
+      textStyle:{fontSize:9,fontWeight:700,fontFamily:"'Inter','Microsoft YaHei'",color:MUTED},
+    })),
+    singleAxis:days.map((d,i)=>({
+      left:56,right:14,type:'category',boundaryGap:false,
+      data:hours.map(h=>String(h).padStart(2,'0')),
+      top:i*100/7+5+'%',height:100/7-8+'%',
+      axisLine:{show:false},axisTick:{show:false},
+      axisLabel:{show:i===6,color:MUTED,fontFamily:'Inter',fontSize:8.5,interval:2},
+      splitLine:{show:false},
+    })),
+    series,
+  });
+}
+
+/* ── 日期切换 ── */
+function renderDay(day){
+  const d=DATA.data[day];
+  document.getElementById('kTotal').textContent=d.total;
+  document.getElementById('kTop').textContent=d.by_app[0]?d.by_app[0][0]:'—';
+  document.getElementById('kContent').textContent=d.content.length+' 条';
+  const p=d.prod,ps=Object.values(p).reduce((a,b)=>a+b,0)||1;
+  const pc=k=>Math.round(p[k]/ps*100);
+  document.getElementById('kProd').innerHTML=
+    `${pc('productive')}% <span style="color:${C_HERO}">/ ${pc('distracting')}%</span>`;
+
+  const top=d.by_app[0],tot=d.total_ms;
+  document.getElementById('tApp').textContent=
+    top?`${top[0]} 占了今天的 ${Math.round(top[1]/tot*100)}%`:'—';
+  document.getElementById('sApp').textContent=
+    `${day} · 应用时长（小时）· 明度 = 占比`;
+  document.getElementById('tDonut').textContent=
+    `有效 ${pc('productive')}%，娱乐 ${pc('distracting')}%`;
+  const topCat=d.by_cat[0];
+  document.getElementById('tWaffle').textContent=
+    topCat?`${topCat[0]} 占了 ${Math.round(topCat[1]/tot*100)}%`:'—';
+  const segs=d.timeline.length;
+  document.getElementById('tTl').textContent=
+    topCat?`${topCat[0]} 填掉了这一天 · ${segs} 段活动`:`${segs} 段活动`;
+  const leg=document.getElementById('sTl');
+  const firstT=d.timeline[0], lastT=d.timeline[d.timeline.length-1];
+  const period=firstT?`活动时段 ${firstT.s}–${lastT.e} · `:'';
+  leg.innerHTML=period+'颜色 = 类别 · '+
+    d.by_cat.map(([c])=>`<span class="dot" style="background:${catShades(day)[c]||FAINT}"></span>${esc(c)}`).join(' ');
+
+  renderAppBars(day); renderDonut(day); renderTimeline(day); renderWaffle(day);
+
+  const tb=document.getElementById('contentBody');
+  tb.innerHTML=d.content.length?'':'<tr><td colspan="4" style="color:#98a2b3">当日无 ≥1 分钟的内容记录</td></tr>';
+  d.content.forEach(c=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${c.t}</td><td>${c.d}</td><td>${esc(c.app||'')}</td><td>${esc(c.title)}</td>`;
+    tb.appendChild(tr);
+  });
+  document.getElementById('tContent').textContent=
+    `内容明细 · ${d.content.length} 条（≥1 分钟）`;
+}
+
+/* ── tabs ── */
+function renderTabs(){
+  const box=document.getElementById('tabs'); box.innerHTML='';
+  DATA.days.forEach((d,i)=>{
+    const b=document.createElement('button');
+    b.textContent=d.slice(5);
+    if(i===DATA.days.length-1)b.classList.add('active');
+    b.onclick=()=>{box.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active'); renderDay(d);};
+    box.appendChild(b);
+  });
+}
+
+renderTabs();
+if(DATA&&DATA.days.length){
+  renderDay(DATA.days[DATA.days.length-1]);
+  renderWeekLine();
+  renderPunch();
+}
+</script>
+</body>
+</html>

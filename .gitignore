@@ -1,0 +1,29 @@
+# ── 个人数据（不要把本机记录/报告推到公开仓库）──
+export_*.csv
+*.db
+*.db-wal
+*.db-shm
+4-两天测试报告.md
+5-每日记录明细.md
+仪表盘demo.html
+probes/*.txt
+probes/sessions/
+probes/_cdp_*
+probes/_e2e_*.png
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ── 系统 / 编辑器 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.log
