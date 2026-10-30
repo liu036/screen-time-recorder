@@ -16,6 +16,11 @@ if not defined PY (
   exit /b 1
 )
 
-start "" "%PY%" main.py start
+rem pythonw is a GUI-subsystem binary: it detaches immediately, no console window.
+if /i "%PY%"=="pythonw" (
+  %PY% main.py start
+) else (
+  start "" %PY% main.py start
+)
 echo Started. A tray icon should appear near the clock.
 timeout /t 3 >nul
