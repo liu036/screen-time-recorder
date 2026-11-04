@@ -16,12 +16,19 @@
 - **筛选规则**：
   - 应用统计：低于 1 分钟的活动段不记录；常驻工具（PixPin / pythonw / WindowsTerminal）与桌宠（`dsh-pet`）不计入
   - 内容明细：低于 1 分钟的内容不展示，但其时长仍计入应用统计
+- **待办与提醒**：便笺式待办窗（增删改查 / 完成 / 优先级 / 截止与提醒时间）+ 托盘气泡到点提醒（免打扰、不重复）
 
 ## 环境
 
 - Windows 10/11
-- Python 3.13（开发环境为托管 Python 3.13.12）
+- Python 3.13，**需要带 tkinter 的完整安装**（待办窗口依赖；部分精简版/嵌入式 Python 没有）
 - 依赖见 `requirements.txt`
+
+自检：
+
+```bat
+python -c "import tkinter, win32gui, psutil, flask; print('deps OK')"
+```
 
 ## 安装
 
@@ -32,7 +39,7 @@ python -m pip install -r requirements.txt
 ## 启动（推荐双击）
 
 - 双击桌面「屏幕时间记录器」快捷方式，或 `start.bat`
-- 托盘右键：今日统计 / 暂停采集 / 开机自启 / 退出
+- 托盘右键：今日统计 / 打开仪表盘 / 待办清单 / 快速添加待办 / 暂停采集 / 开机自启 / 退出
 - 停止：`stop.bat`，或右键托盘「退出」
 
 > 已做单实例保护：重复启动会提示"已在运行"，不会双份采集。
@@ -73,10 +80,42 @@ python -m pip install -r requirements.txt
 python main.py dashboard
 ```
 
+## 待办与提醒
+
+托盘右键 →「待办清单」打开便笺窗；「快速添加待办…」会打开窗口并直接聚焦输入框。
+
+### 窗口操作
+
+| 操作 | 效果 |
+|---|---|
+| **回车** | 添加待办（标题即内容） |
+| **点左侧圆圈** | 完成 / 取消完成 |
+| **双击某行** | 编辑：备注、截止时间、提醒时间、优先级 |
+| **点右侧 ×** | 删除（二次确认） |
+| **Ctrl+N** | 聚焦输入框 |
+| **F5** | 手动刷新 |
+
+- 时间输入支持 `2026-11-05 18:00`、`11-05 18:00`、`18:00`（当天/次日该时刻）
+- 排序：未完成 → 逾期优先 → 临近优先 → 优先级
+- 窗口位置和大小会记住，下次打开保持原样
+- 单实例：重复打开只会激活已有窗口
+
+### 提醒规则
+
+- 每 **20 秒**检查一次到期待办，通过 **Windows 托盘气泡**提醒
+- **不重复**：先写 `reminded_ts` 再弹，异常重启也不会重复轰炸
+- **不打扰**：锁屏或连续 15 分钟无输入时暂不弹，恢复后自动补
+- **不刷屏**：同一时刻多条到期合并成一条；启动时超过 6 小时的历史逾期合并成一条
+- 点击气泡 → 打开待办窗
+
+> 待办窗口是**独立进程**，关掉它不影响采集与提醒（气泡兜底）。
+> 数据通过本地 API（`127.0.0.1:8765/api/todos`）读写，主进程是唯一写入方。
+
 ## 命令行
 
 ```bat
 python main.py start          REM 启动常驻（托盘）
+python main.py todo           REM 打开待办窗（--focus 聚焦输入框）
 python main.py status         REM 事件/快照条数
 python main.py today          REM 今日统计（含内容明细）
 python main.py yesterday      REM 昨日统计
@@ -104,21 +143,28 @@ python main.py noautostart    REM 取消开机自启
 - 抖音内容级依赖「读屏标签」，关闭后自动降级为应用级（只记"抖音"）。
 - 睡眠/合盖检测、虚拟桌面污染、精确 AFK 切割尚未实现。
 - 快照的 `visibility` 目前只记 `visible`（V1 补 focus/hidden）。
+- 待办为本机单机，暂无重复待办、子任务、日历视图（P2 规划）。
+- 托盘气泡可能被 Windows「专注助手 / 通知」设置拦截；若收不到提醒，检查系统通知设置。
 
 ## 目录结构
 
 ```
-main.py                  入口（start/status/today/export/delete/autostart）
+main.py                  入口（start / todo / status / today / export / delete / autostart）
+start.bat                一键启动（探测带 tkinter 的 Python）
 screen_time_recorder/
   config.py              配置常量（实测依据见《3-技术调研报告》）
   collector.py           前台/标题/锁屏事件采集 + ContentFetcher
   douyin_content.py      抖音 UIA 内容抓取
   snapshot.py            可见性快照
-  storage.py             SQLite 存储与查询
+  storage.py             SQLite 存储与查询（含 todos / edits）
   classifier.py          活动派生 / 分类 / 内容聚合
+  reminder.py            待办提醒调度（20s tick / 免打扰 / 合并）
+  todo_window.py         tkinter 待办便笺窗（独立进程）
   cli.py                 统计 / 导出 / 删除
-  tray.py                pywin32 原生系统托盘
+  tray.py                pywin32 原生托盘 + 气泡通知
   daemon.py              采集/快照/心跳线程编排
+  dashboard.py           仪表盘数据聚合
+  web.py                 本地仪表盘 + 待办 REST API
 probes/                  调试与验证脚本
 tests/                   自动化测试
 ```

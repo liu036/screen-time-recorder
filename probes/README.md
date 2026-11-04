@@ -29,18 +29,28 @@
 |---|---|
 | `tray_native_test.py` | 无界面托盘功能测试（创建窗口/图标/消息循环/退出） |
 
+## 待办
+
+| 脚本 | 用途 |
+|---|---|
+| `test_todo_api.py` | 待办 REST API 集成测试（临时库 + 端口 8767，不碰真实数据） |
+| `test_todo_window.py` | 窗口冒烟：临时库 + 端口 8768，显示 3 秒并截图 `_todo_window.png` |
+| `test_balloon.py` | 托盘气泡冒烟：真实弹一条，5 秒后清理临时图标 |
+
+> 单元测试在 `../tests/test_todo.py`（CRUD / 排序 / 去重 / 免打扰 / 稍后提醒 / 启动补扫）。
+
 ## 仪表盘（编辑 / 交互）
 
 | 脚本 | 用途 |
 |---|---|
 | `export_dashboard.py` | 导出静态快照（`仪表盘demo.html`） |
 | `test_edit_api.py` | 编辑 API 集成测试（临时库，不碰真实数据） |
-| `ui_test_timeline.py` | 用 CDP 驱动无头 Chrome 验证**缩放 / 悬停 / 双击还原 / 打开编辑浮层** |
+| `ui_test_timeline.py` | 用 CDP 驱动无头 Chrome 验证**缩放 / 悬停 / 还原按钮 / 打开编辑浮层** |
 | `ui_edit_e2e.py` | 端到端验证 **改分类 → 撤销 → 删除段 → 抽屉撤销**（临时库 + 独立端口 8766） |
 
 > 说明：两个 UI 测试需要 `websocket-client`，并会启动无头 Chrome。
-> 关键 flag：`--disable-extensions`（本机被策略安装的扩展会拦截 localhost）、
-> `--no-proxy-server`。脚本会自动清理对应调试实例。
+> 关键 flag：`--disable-extensions`——本机被策略安装的扩展会拦截 localhost，
+> 表现为页面永远 loading、`document.readyState=loading`。
 
 ## 已迁移
 

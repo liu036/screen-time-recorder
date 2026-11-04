@@ -10,6 +10,9 @@ probes/*.txt
 probes/sessions/
 probes/_cdp_*
 probes/_e2e_*.png
+probes/_todo_*.png
+probes/_shot*.png
+probes/_cdp_*.png
 
 # ── Python ──
 __pycache__/
