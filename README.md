@@ -82,6 +82,8 @@ python main.py dashboard
 
 ## 待办与提醒
 
+![待办窗口](assets/todo-window.png)
+
 托盘右键 →「待办清单」打开便笺窗；「快速添加待办…」会打开窗口并直接聚焦输入框。
 
 ### 窗口操作

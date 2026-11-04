@@ -169,7 +169,15 @@ class TodoApp:
         self._after_id = None
         self._offline = False
         self._rows = []
+        self._last_sig = None
+        self._last_w = None
+        self._resize_after = None
         self._focus_input = focus_input
+        # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
+        self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
+        self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
+                                        weight="bold")
+        self._f_small = tkfont.Font(family="Microsoft YaHei UI", size=8)
         self._restore_geometry()
         self._build()
         self.refresh()
@@ -178,6 +186,7 @@ class TodoApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Control-n>", lambda e: self.entry.focus_set())
         self.root.bind("<F5>", lambda e: self.refresh())
+        self.root.bind("<Configure>", self._on_resize)
 
     # ---- 布局 ----
     def _build(self):
@@ -237,6 +246,21 @@ class TodoApp:
     def _on_canvas(self, e):
         self.canvas.itemconfigure(self._win, width=e.width)
 
+    def _on_resize(self, e):
+        """窗口宽度变化 → 标题可用宽度变了，强制重绘一次（防抖 180ms）。"""
+        if e.widget is not self.root or e.width <= 1:
+            return
+        if e.width == self._last_w:
+            return
+        self._last_w = e.width
+        self._last_sig = None
+        if self._resize_after:
+            try:
+                self.root.after_cancel(self._resize_after)
+            except Exception:
+                pass
+        self._resize_after = self.root.after(180, self.refresh)
+
     def _on_wheel(self, e):
         try:
             self.canvas.yview_scroll(int(-e.delta / 120), "units")
@@ -244,6 +268,9 @@ class TodoApp:
             pass
 
     # ---- 刷新 ----
+    def _schedule(self):
+        self._after_id = self.root.after(config.TODO_POLL_MS, self.refresh)
+
     def refresh(self):
         if self._after_id:
             try:
@@ -254,13 +281,21 @@ class TodoApp:
         try:
             data = api("/api/todos?filter=" + self.filter)["todos"]
             summary = api("/api/todos/summary")
-            self._offline = False
         except (urllib.error.URLError, OSError, ValueError) as e:
-            self._render_offline(e)
-            self._after_id = self.root.after(config.TODO_POLL_MS, self.refresh)
+            # 离线时只渲染一次，避免每 3 秒重建错误页
+            if not self._offline:
+                self._offline = True
+                self._last_sig = None
+                self._render_offline(e)
+            self._schedule()
             return
-        self._render(data, summary)
-        self._after_id = self.root.after(config.TODO_POLL_MS, self.refresh)
+        self._offline = False
+        # 数据没变就不重建 DOM：省内存/CPU，也不会打断滚动和悬停
+        sig = json.dumps([data, summary], sort_keys=True, ensure_ascii=False)
+        if sig != self._last_sig:
+            self._last_sig = sig
+            self._render(data, summary)
+        self._schedule()
 
     def _render(self, todos, summary):
         pos = self.canvas.yview()[0] if self._rows else 0.0
@@ -329,12 +364,15 @@ class TodoApp:
 
         # 标题：按可用宽度截断，避免撑破布局
         title_fg = DONE if is_done else INK
-        font = F_TITLE_HI if (pr == 2 and not is_done) else F_TITLE
+        font = self._f_title_hi if (pr == 2 and not is_done) else self._f_title
         # 左侧勾选(20+12) + 优先级条(3+8)，右侧删除(≈26)，再留边距
-        avail = max(80, self.root.winfo_width() - 85)
+        win_w = self.root.winfo_width()
+        if win_w <= 1:  # 首次渲染时窗口尚未映射
+            win_w = config.TODO_WINDOW_SIZE[0]
+        avail = max(80, win_w - 85)
         if time_lbl is not None:
-            avail -= tkfont.Font(font=F_SMALL).measure(ts_text) + 14
-        shown = _ellipsize(item["title"], tkfont.Font(font=font), avail)
+            avail -= self._f_small.measure(ts_text) + 14
+        shown = _ellipsize(item["title"], font, avail)
         title = tk.Label(row, text=shown, font=font, fg=title_fg,
                          bg=BG, anchor="w", justify="left")
         title.pack(side="left", fill="x", expand=True)

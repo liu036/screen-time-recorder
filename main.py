@@ -13,9 +13,9 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from screen_time_recorder.daemon import Daemon
-from screen_time_recorder.storage import Storage
-from screen_time_recorder import cli
+# 注意：这里不要在顶层 import daemon/storage/cli。
+# `main.py todo` 只需要 tkinter，若顶层导入采集栈，会把 uiautomation、
+# win32gui、sqlite3 全部加载进待办窗口进程，白白多占 ~55MB。
 
 # 命名互斥体句柄必须保持模块级引用，否则被 GC 关闭后单实例保护失效
 _mutex_handle = None
@@ -83,6 +83,7 @@ def main():
                 pass
             # 即便托盘失败，也尽量保持采集
             try:
+                from screen_time_recorder.daemon import Daemon
                 Daemon().run()
             except Exception:
                 pass
@@ -93,34 +94,42 @@ def main():
         # 待办便笺窗（独立进程；--focus 时启动后聚焦输入框）
         from screen_time_recorder.todo_window import main as todo_main
         todo_main()
-    elif cmd == "status":
-        st = Storage()
-        print(f"事件条数: {st.count_events()}")
-        print(f"快照条数: {st.count_snapshots()}")
-        st.close()
-    elif cmd == "today":
-        st = Storage()
-        cli.cmd_view(st, datetime.now().strftime("%Y-%m-%d"))
-        st.close()
-    elif cmd == "yesterday":
-        st = Storage()
-        cli.cmd_view(st, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"))
-        st.close()
-    elif cmd == "apps":
-        st = Storage()
-        cli.cmd_apps(st)
-        st.close()
-    elif cmd == "export":
-        st = Storage()
-        day = sys.argv[2] if len(sys.argv) > 2 else datetime.now().strftime("%Y-%m-%d")
+    elif cmd in ("status", "today", "yesterday", "apps",
+                 "export", "delete"):
+        # 只有这些命令需要存储层，按需导入（避免 todo/dashboard 付加载代价）
+        from screen_time_recorder.storage import Storage
+        from screen_time_recorder import cli
+
+        if cmd == "status":
+            st = Storage()
+            print(f"事件条数: {st.count_events()}")
+            print(f"快照条数: {st.count_snapshots()}")
+            st.close()
+            return
+        if cmd == "apps":
+            st = Storage()
+            cli.cmd_apps(st)
+            st.close()
+            return
+
+        if cmd == "today":
+            day = datetime.now().strftime("%Y-%m-%d")
+        elif cmd == "yesterday":
+            day = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            day = (sys.argv[2] if len(sys.argv) > 2
+                   else datetime.now().strftime("%Y-%m-%d"))
         fmt = sys.argv[3] if len(sys.argv) > 3 else "csv"
-        cli.cmd_export(st, day, fmt, None)
-        st.close()
-    elif cmd == "delete":
         st = Storage()
-        day = sys.argv[2] if len(sys.argv) > 2 else datetime.now().strftime("%Y-%m-%d")
-        cli.cmd_delete(st, day)
-        st.close()
+        try:
+            if cmd == "export":
+                cli.cmd_export(st, day, fmt, None)
+            elif cmd == "delete":
+                cli.cmd_delete(st, day)
+            else:
+                cli.cmd_view(st, day)
+        finally:
+            st.close()
     elif cmd == "autostart":
         from screen_time_recorder import tray
         tray.install_autostart(True)
