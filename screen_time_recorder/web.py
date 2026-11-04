@@ -93,7 +93,83 @@ def create_app(storage):
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
+    # ---- 待办（待办窗口 / 托盘 / 仪表盘共用）----
+    @app.get("/api/todos")
+    def api_todos():
+        f = request.args.get("filter", "open")
+        if f not in ("today", "open", "all"):
+            f = "open"
+        return jsonify({"todos": storage.list_todos(f)})
+
+    @app.get("/api/todos/summary")
+    def api_todos_summary():
+        return jsonify(storage.todo_summary())
+
+    @app.post("/api/todos")
+    def api_todo_add():
+        body = request.get_json(silent=True) or {}
+        try:
+            tid = storage.add_todo(
+                body.get("title"), body.get("note") or "",
+                _as_ms(body.get("due_ts")), _as_ms(body.get("remind_ts")),
+                body.get("priority", 1))
+        except (ValueError, TypeError) as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": True, "todo": storage.get_todo(tid)}), 201
+
+    @app.patch("/api/todos/<int:todo_id>")
+    def api_todo_update(todo_id):
+        body = request.get_json(silent=True) or {}
+        fields = {}
+        for k in ("title", "note", "status", "priority", "repeat_rule"):
+            if k in body:
+                fields[k] = body[k]
+        for k in ("due_ts", "remind_ts"):
+            if k in body:
+                fields[k] = _as_ms(body[k])
+        if not fields:
+            todo = storage.get_todo(todo_id)
+            if not todo:
+                return jsonify({"error": "待办不存在"}), 404
+            return jsonify({"ok": True, "todo": todo})
+        try:
+            ok = storage.update_todo(todo_id, **fields)
+        except (ValueError, TypeError) as e:
+            return jsonify({"error": str(e)}), 400
+        if not ok:
+            return jsonify({"error": "待办不存在"}), 404
+        return jsonify({"ok": True, "todo": storage.get_todo(todo_id)})
+
+    @app.post("/api/todos/<int:todo_id>/done")
+    def api_todo_done(todo_id):
+        body = request.get_json(silent=True) or {}
+        if not storage.complete_todo(todo_id, bool(body.get("done", True))):
+            return jsonify({"error": "待办不存在"}), 404
+        return jsonify({"ok": True, "todo": storage.get_todo(todo_id)})
+
+    @app.post("/api/todos/<int:todo_id>/snooze")
+    def api_todo_snooze(todo_id):
+        body = request.get_json(silent=True) or {}
+        try:
+            minutes = int(body.get("minutes", 10))
+        except (TypeError, ValueError):
+            return jsonify({"error": "minutes 必须是整数"}), 400
+        if not storage.snooze_todo(todo_id, minutes):
+            return jsonify({"error": "待办不存在"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/todos/<int:todo_id>")
+    def api_todo_delete(todo_id):
+        return jsonify({"ok": True, "deleted": storage.delete_todo(todo_id)})
+
     return app
+
+
+def _as_ms(value):
+    """毫秒时间戳容错：None/空/0 → None；数字或数字字符串 → int。"""
+    if value in (None, "", 0):
+        return None
+    return int(value)
 
 
 def start_server(storage, port=DEFAULT_PORT, open_browser=False):

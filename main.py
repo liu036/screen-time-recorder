@@ -54,7 +54,8 @@ def _boot_log_and_box():
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python main.py [start|status|today|yesterday|apps|export|delete]")
+        print("用法: python main.py "
+              "[start|status|today|yesterday|apps|export|delete|todo|dashboard|autostart]")
         return
     cmd = sys.argv[1]
     if cmd == "start":
@@ -88,6 +89,10 @@ def main():
     elif cmd == "dashboard":
         from screen_time_recorder.web import run_standalone
         run_standalone()
+    elif cmd == "todo":
+        # 待办便笺窗（独立进程；--focus 时启动后聚焦输入框）
+        from screen_time_recorder.todo_window import main as todo_main
+        todo_main()
     elif cmd == "status":
         st = Storage()
         print(f"事件条数: {st.count_events()}")

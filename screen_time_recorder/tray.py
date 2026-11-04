@@ -11,6 +11,7 @@ import io
 import time
 import tempfile
 import ctypes
+import subprocess
 from datetime import datetime
 
 import win32api
@@ -23,6 +24,62 @@ from PIL import Image, ImageDraw
 from .daemon import Daemon
 from . import cli
 from . import config
+from .reminder import ReminderService
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NIN_BALLOONUSERCLICK = 0x0405  # 点击气泡正文
+
+
+# ---------- 气泡通知（原生 NOTIFYICONDATAW，避免 pywin32 版本差异）----------
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
+class _NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("hWnd", ctypes.c_void_p),
+        ("uID", ctypes.c_uint),
+        ("uFlags", ctypes.c_uint),
+        ("uCallbackMessage", ctypes.c_uint),
+        ("hIcon", ctypes.c_void_p),
+        ("szTip", ctypes.c_wchar * 128),
+        ("dwState", ctypes.c_ulong),
+        ("dwStateMask", ctypes.c_ulong),
+        ("szInfo", ctypes.c_wchar * 256),
+        ("uTimeout", ctypes.c_uint),
+        ("szInfoTitle", ctypes.c_wchar * 64),
+        ("dwInfoFlags", ctypes.c_ulong),
+        ("guidItem", _GUID),
+        ("hBalloonIcon", ctypes.c_void_p),
+    ]
+
+
+def _balloon(hwnd, hicon, tip, title, body):
+    """弹出托盘气泡。返回 False 表示系统未接受（可能被专注助手拦截）。"""
+    NIF_INFO, NIF_TIP, NIIF_INFO, NIM_MODIFY = 0x10, 0x04, 0x01, 0x01
+    try:
+        nid = _NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
+        nid.hWnd = hwnd
+        nid.uID = 0
+        nid.uFlags = NIF_INFO | NIF_TIP
+        nid.uCallbackMessage = WM_TRAYICON
+        nid.hIcon = hicon or 0
+        nid.szTip = (tip or "")[:127]
+        nid.szInfo = (body or "")[:255]
+        nid.szInfoTitle = (title or "")[:63]
+        nid.dwInfoFlags = NIIF_INFO
+        nid.uTimeout = 10000
+        shell32 = ctypes.windll.shell32
+        shell32.Shell_NotifyIconW.argtypes = [
+            ctypes.c_ulong, ctypes.POINTER(_NOTIFYICONDATAW)]
+        shell32.Shell_NotifyIconW.restype = ctypes.c_bool
+        return bool(shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid)))
+    except Exception as e:
+        print(f"[tray] 气泡通知失败: {e}")
+        return False
 
 
 def _setup_logging():
@@ -71,8 +128,9 @@ class TrayApp:
         self.hicon = None
         self._wndclass = None
         self._ico_path = build_ico()
-        self._tip = "屏幕时间记录器 MVP"
+        self._tip = "屏幕时间记录器 · 待办"
         self._web_url = None
+        self.reminder = None
 
     # ---- 托盘图标 ----
     def _add_icon(self):
@@ -121,6 +179,9 @@ class TrayApp:
             self._add_icon()
             return 0
         if msg == WM_TRAYICON:
+            if lparam == NIN_BALLOONUSERCLICK:
+                self.open_todo_window()
+                return 0
             if lparam in (win32con.WM_RBUTTONUP, win32con.WM_RBUTTONDOWN):
                 self._show_menu()
                 return 0
@@ -138,12 +199,16 @@ class TrayApp:
         menu = win32gui.CreatePopupMenu()
         win32gui.AppendMenu(menu, win32con.MF_STRING, 1, "今日统计")
         win32gui.AppendMenu(menu, win32con.MF_STRING, 2, "打开仪表盘")
-        win32gui.AppendMenu(
-            menu, win32con.MF_STRING, 3,
-            "暂停采集" if not self.paused else "继续采集")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, 4, "开机自启")
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
-        win32gui.AppendMenu(menu, win32con.MF_STRING, 5, "退出")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 3, "待办清单")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 4, "快速添加待办…")
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+        win32gui.AppendMenu(
+            menu, win32con.MF_STRING, 5,
+            "暂停采集" if not self.paused else "继续采集")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 6, "开机自启")
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, 7, "退出")
         pos = win32gui.GetCursorPos()
         win32gui.SetForegroundWindow(self.hwnd)
         cmd = win32gui.TrackPopupMenu(
@@ -157,10 +222,14 @@ class TrayApp:
         elif cmd == 2:
             self.on_dashboard()
         elif cmd == 3:
-            self.on_pause()
+            self.open_todo_window(focus=False)
         elif cmd == 4:
-            self.on_autostart()
+            self.open_todo_window(focus=True)
         elif cmd == 5:
+            self.on_pause()
+        elif cmd == 6:
+            self.on_autostart()
+        elif cmd == 7:
             self.on_quit()
 
     # ---- 菜单动作 ----
@@ -187,6 +256,61 @@ class TrayApp:
         except Exception as e:
             _show_message_box("屏幕时间记录器", f"打开仪表盘失败：{e}", error=True)
 
+    # ---- 待办 ----
+    def open_todo_window(self, focus=False):
+        """拉起待办窗（独立进程）。已存在时窗口自身会激活自己。"""
+        script = os.path.join(BASE_DIR, "main.py")
+        exe = sys.executable
+        # 确保用 GUI 子系统，避免弹控制台
+        if exe.lower().endswith("python.exe"):
+            cand = exe[:-len("python.exe")] + "pythonw.exe"
+            if os.path.exists(cand):
+                exe = cand
+        args = [exe, script, "todo"]
+        if focus:
+            args.append("--focus")
+        try:
+            subprocess.Popen(args, cwd=BASE_DIR,
+                             creationflags=0x00000008)  # DETACHED_PROCESS
+        except Exception as e:
+            _show_message_box("屏幕时间记录器",
+                              f"打开待办窗口失败：{e}", error=True)
+
+    def notify(self, title, body, todo_ids=None):
+        """ReminderService 的通知回调：托盘气泡。"""
+        ok = _balloon(self.hwnd, self.hicon, self._tip, title, body)
+        if not ok:
+            print(f"[tray] 气泡未被系统接受：{title} / {body!r}")
+        return ok
+
+    def _availability(self):
+        """免打扰判定：锁屏或长时间离开时先不弹，恢复后会补。"""
+        try:
+            if self.daemon.collector.lock_state == 2:
+                return False, "锁屏"
+            from .collector import get_idle_ms
+            idle = get_idle_ms()
+            if idle > config.REMINDER_IDLE_LIMIT_MS:
+                return False, "离开 %d 分钟" % (idle // 60000)
+        except Exception:
+            pass
+        return True, ""
+
+    def _update_tip(self, summary):
+        n = summary.get("open", 0)
+        od = summary.get("overdue", 0)
+        tip = "屏幕时间记录器 · 未完成 %d" % n
+        if od:
+            tip += "（逾期 %d）" % od
+        self._tip = tip[:127]
+        try:
+            win32gui.Shell_NotifyIcon(
+                win32gui.NIM_MODIFY,
+                (self.hwnd, 0, win32gui.NIF_TIP, WM_TRAYICON,
+                 self.hicon, self._tip))
+        except Exception:
+            pass
+
     def on_pause(self):
         if self.paused:
             self.daemon.resume()
@@ -203,6 +327,11 @@ class TrayApp:
 
     def on_quit(self):
         self._remove_icon()
+        try:
+            if self.reminder:
+                self.reminder.stop()
+        except Exception:
+            pass
         try:
             self.daemon.close()
         except Exception:
@@ -230,6 +359,15 @@ class TrayApp:
                 win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
             self._create_window()
             self._add_icon()
+            # 待办提醒（依赖已建好的 hwnd / hicon）
+            try:
+                self.reminder = ReminderService(
+                    self.daemon.storage, self.notify,
+                    availability=self._availability, badge=self._update_tip)
+                self.reminder.start()
+                self._update_tip(self.daemon.storage.todo_summary())
+            except Exception as e:
+                print(f"[tray] 提醒服务启动失败: {e}")
             print("[tray] 托盘已启动，开始常驻采集。")
             win32gui.PumpMessages()
         except Exception as e:
@@ -266,6 +404,12 @@ def install_autostart(enable=True):
             0, winreg.KEY_SET_VALUE)
         if enable:
             exe = sys.executable
+            # 命令行下 sys.executable 是 python.exe，开机自启会带出控制台黑窗；
+            # 自动换成同目录的 pythonw.exe（GUI 子系统）。
+            if exe.lower().endswith("python.exe"):
+                cand = exe[:-len("python.exe")] + "pythonw.exe"
+                if os.path.exists(cand):
+                    exe = cand
             script = os.path.abspath(sys.argv[0])
             cmd = f'"{exe}" "{script}" start'
             winreg.SetValueEx(key, "ScreenTimeRecorder", 0, winreg.REG_SZ, cmd)

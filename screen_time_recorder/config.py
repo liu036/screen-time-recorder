@@ -27,6 +27,13 @@ MIN_CONTENT_DISPLAY_MS = 60000    # 内容明细低于 1 分钟不展示（时�
 SWITCH_MIN_DURATION_MS = 2000     # 历史阈值（<2s 合并），当前不再使用
 AFK_THRESHOLD_MS = 90000          # 默认 90s 无输入判定空闲（F2）
 
+# ---------- 待办提醒 ----------
+REMINDER_INTERVAL_MS = 20000          # 20s 扫一次到期（足够准，又几乎不耗 CPU）
+REMINDER_IDLE_LIMIT_MS = 900000        # 15 分钟无输入视为离开，暂不打扰（回来会补）
+REMINDER_STARTUP_GRACE_MS = 21600000   # 启动补扫：超 6 小时的逾期合并成一条，不逐条轰炸
+TODO_POLL_MS = 3000                    # 待办窗口刷新间隔（只读，轻量）
+TODO_WINDOW_SIZE = (360, 520)          # 便笺窗默认尺寸
+
 # ---------- 噪音过滤：进程名黑名单 ----------
 # 这些进程下的窗口一律不算"应用"（T5 实测：输入体验/Overlay/IME 宿主等）
 NOISE_PROC = {

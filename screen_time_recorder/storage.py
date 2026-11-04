@@ -72,7 +72,43 @@ CREATE TABLE IF NOT EXISTS edits (
     payload     TEXT,
     applied     INTEGER DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS todos (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT    NOT NULL,
+    note        TEXT    DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'open',   -- open/done/archived
+    priority    INTEGER DEFAULT 1,                 -- 0低 1中 2高
+    due_ts      INTEGER,                           -- 截止时间(ms)，NULL=无期限
+    remind_ts   INTEGER,                           -- 提醒时间(ms)，NULL=不提醒
+    reminded_ts INTEGER,                           -- 已提醒时间(ms)，用于去重
+    snooze_ts   INTEGER,                           -- 稍后提醒到(ms)
+    repeat_rule TEXT,                              -- 预留：daily/weekly/...
+    sort_order  INTEGER DEFAULT 0,
+    created_ts  INTEGER NOT NULL,
+    done_ts     INTEGER,
+    source      TEXT    DEFAULT 'manual'
+);
+CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, due_ts);
+CREATE INDEX IF NOT EXISTS idx_todos_remind ON todos(status, remind_ts);
 """
+
+_TODO_COLS = ("id", "title", "note", "status", "priority", "due_ts",
+              "remind_ts", "reminded_ts", "snooze_ts", "repeat_rule",
+              "sort_order", "created_ts", "done_ts", "source")
+_TODO_SELECT = ("SELECT id,title,note,status,priority,due_ts,remind_ts,"
+                "reminded_ts,snooze_ts,repeat_rule,sort_order,created_ts,"
+                "done_ts,source FROM todos")
+# 允许通过 update_todo 修改的字段（白名单，防注入 / 防误改）
+_TODO_UPDATABLE = {"title", "note", "status", "priority",
+                   "due_ts", "remind_ts", "repeat_rule", "sort_order"}
+
+
+def _local_day_start_ms(ts_ms):
+    """某个时间戳所在本地日期的 00:00（毫秒）。"""
+    t = time.localtime(ts_ms / 1000.0)
+    return int(time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                            0, 0, 0, 0, 0, -1)) * 1000)
 
 
 class Storage:
@@ -252,6 +288,156 @@ class Storage:
         with self._lock:
             return self._conn.execute(
                 "SELECT MIN(ts), MAX(ts) FROM events").fetchone()
+
+    # ---------- 待办 ----------
+    def add_todo(self, title, note="", due_ts=None, remind_ts=None, priority=1):
+        """新增待办，返回 id。标题为空抛 ValueError。"""
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("待办标题不能为空")
+        priority = max(0, min(2, int(priority if priority is not None else 1)))
+        now = int(time.time() * 1000)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO todos (title,note,status,priority,due_ts,remind_ts,"
+                "sort_order,created_ts,source) "
+                "VALUES (?,?,'open',?,?,?,0,?,'manual')",
+                (title, note or "", priority, due_ts, remind_ts, now),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def get_todo(self, todo_id):
+        with self._lock:
+            row = self._conn.execute(
+                _TODO_SELECT + " WHERE id=?", (int(todo_id),)).fetchone()
+        return dict(zip(_TODO_COLS, row)) if row else None
+
+    def list_todos(self, filter="open", now_ms=None, limit=200):
+        """filter: open / today / all。
+
+        today = 未完成全部 + 今天完成的（这样下班前能看到当天战果）；
+        all   = 除归档外全部。排序：未完成优先 → 逾期优先 → 临近的优先。
+        """
+        now = int(now_ms or time.time() * 1000)
+        params = []
+        if filter == "open":
+            where = "status='open'"
+        elif filter == "today":
+            where = "status='open' OR (status='done' AND done_ts>=?)"
+            params.append(_local_day_start_ms(now))
+        else:  # all
+            where = "status<>'archived'"
+        sql = (_TODO_SELECT + " WHERE " + where + " ORDER BY "
+               "CASE status WHEN 'open' THEN 0 ELSE 1 END, "
+               "CASE "
+               "  WHEN status='open' AND due_ts IS NOT NULL AND due_ts<? THEN 0 "
+               "  WHEN status='open' AND (due_ts IS NOT NULL OR remind_ts IS NOT NULL) THEN 1 "
+               "  WHEN status='open' THEN 2 ELSE 3 END, "
+               "COALESCE(due_ts, remind_ts, 9999999999999), priority DESC, id DESC "
+               "LIMIT ?")
+        with self._lock:
+            rows = self._conn.execute(
+                sql, tuple(params) + (now, int(limit))).fetchall()
+        return [dict(zip(_TODO_COLS, r)) for r in rows]
+
+    def update_todo(self, todo_id, **fields):
+        """更新待办字段（白名单）。返回是否命中。"""
+        unknown = set(fields) - _TODO_UPDATABLE
+        if unknown:
+            raise ValueError("不支持的字段: " + ", ".join(sorted(unknown)))
+        if "title" in fields:
+            fields["title"] = (fields["title"] or "").strip()
+            if not fields["title"]:
+                raise ValueError("待办标题不能为空")
+        if "priority" in fields:
+            fields["priority"] = max(0, min(2, int(fields["priority"])))
+
+        sets, params = [], []
+        for k, v in fields.items():
+            sets.append(k + "=?")
+            params.append(v)
+        # 改了提醒时间 → 允许重新提醒（清掉已提醒与稍后状态）
+        if "remind_ts" in fields:
+            sets.extend(["reminded_ts=NULL", "snooze_ts=NULL"])
+        # 状态切换 → 维护 done_ts
+        if fields.get("status") == "done":
+            sets.append("done_ts=?")
+            params.append(int(time.time() * 1000))
+        elif fields.get("status") == "open":
+            sets.append("done_ts=NULL")
+        if not sets:
+            return False
+        params.append(int(todo_id))
+        with self._lock:
+            n = self._conn.execute(
+                "UPDATE todos SET " + ", ".join(sets) + " WHERE id=?",
+                params).rowcount
+            self._conn.commit()
+        return n > 0
+
+    def complete_todo(self, todo_id, done=True):
+        return self.update_todo(todo_id, status="done" if done else "open")
+
+    def delete_todo(self, todo_id):
+        with self._lock:
+            n = self._conn.execute(
+                "DELETE FROM todos WHERE id=?", (int(todo_id),)).rowcount
+            self._conn.commit()
+        return n
+
+    def due_todos(self, now_ms=None):
+        """到点待提醒的待办（snooze 到期也在这里命中）。"""
+        now = int(now_ms or time.time() * 1000)
+        with self._lock:
+            rows = self._conn.execute(
+                _TODO_SELECT + " WHERE status='open' AND remind_ts IS NOT NULL "
+                "AND remind_ts<=? "
+                "AND (reminded_ts IS NULL OR reminded_ts<remind_ts) "
+                "AND (snooze_ts IS NULL OR snooze_ts<=?) "
+                "ORDER BY remind_ts, priority DESC",
+                (now, now)).fetchall()
+        return [dict(zip(_TODO_COLS, r)) for r in rows]
+
+    def mark_reminded(self, todo_id, ts_ms=None):
+        """标记已提醒。必须先写库再弹通知，避免异常重启后重复轰炸。"""
+        ts = int(ts_ms or time.time() * 1000)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE todos SET reminded_ts=? WHERE id=?",
+                (ts, int(todo_id)))
+            self._conn.commit()
+
+    def snooze_todo(self, todo_id, minutes=10, now_ms=None):
+        """稍后提醒：清空 reminded_ts 让 snooze 到期后能再次命中。"""
+        now = int(now_ms or time.time() * 1000)
+        until = now + max(1, int(minutes)) * 60000
+        with self._lock:
+            n = self._conn.execute(
+                "UPDATE todos SET snooze_ts=?, reminded_ts=NULL WHERE id=?",
+                (until, int(todo_id))).rowcount
+            self._conn.commit()
+        return n > 0
+
+    def todo_summary(self, now_ms=None):
+        now = int(now_ms or time.time() * 1000)
+        day0 = _local_day_start_ms(now)
+        day1 = day0 + 86400000
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT "
+                "COALESCE(SUM(CASE WHEN status='open' THEN 1 ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='open' AND due_ts IS NOT NULL "
+                "  AND due_ts<? THEN 1 ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='open' AND "
+                "  ((due_ts>=? AND due_ts<?) OR (remind_ts>=? AND remind_ts<?)) "
+                "  THEN 1 ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='done' AND done_ts>=? "
+                "  THEN 1 ELSE 0 END),0) "
+                "FROM todos",
+                (now, day0, day1, day0, day1, day0)).fetchone()
+        return {"open": row[0], "overdue": row[1],
+                "due_today": row[2], "done_today": row[3]}
 
     # ---------- 用户编辑层（Override，用户数据最高权限）----------
     def add_edit(self, target_type, target_id, action, payload):
