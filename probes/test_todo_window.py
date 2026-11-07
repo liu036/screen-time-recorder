@@ -40,6 +40,10 @@ def main():
     # 隔离窗口状态文件，避免覆盖真实几何信息
     todo_window.STATE_PATH = os.path.join(tempfile.mkdtemp(), "win_state.json")
     ui = todo_window.TodoApp()
+    # 截图期间移到干净区域并临时置顶，避免被桌面悬浮窗/桌宠挡住
+    ui.root.geometry("360x520+120+120")
+    ui.root.attributes("-topmost", True)
+    ui.root.lift()
     ui.filter = "today"
     ui.refresh()
 
@@ -48,7 +52,9 @@ def main():
     def shot():
         try:
             from PIL import ImageGrab
+            ui.root.lift()
             ui.root.update_idletasks()
+            time.sleep(0.4)
             x, y = ui.root.winfo_rootx(), ui.root.winfo_rooty()
             w, h = ui.root.winfo_width(), ui.root.winfo_height()
             img = ImageGrab.grab(bbox=(x, y, x + w, y + h))

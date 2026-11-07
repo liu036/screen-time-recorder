@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""待办窗口单视图交互冒烟（12 项）：+ 号新建 / 行内编辑 / 优先级循环 /
-直接删除 / 滚动开关 / 点空白保存 / 真实点击按钮与标题不被全局回调吃掉。
+"""待办窗口单视图交互冒烟（13 项）：+ 号新建 / 行内编辑 / 优先级循环 /
+直接删除 / 滚动开关 / 点空白保存 / 真实点击按钮与标题不被全局回调吃掉 /
+置顶开关与重开恢复。
 
 运行：python probes/test_todo_inline.py
 用临时库 + 独立端口，不碰真实数据。
 """
+import json
 import os
 import sys
 import tempfile
@@ -265,6 +267,32 @@ def main():
     assert wait_for(lambda: any(t["title"] == "真实点击标题改"
                                 for t in st.list_todos("all")))
     print("真实点击标题 → 行内编辑 → 点空白保存 OK")
+
+    # 13) 置顶开关：切换 / 按钮状态 / 立即落盘 / 重开恢复
+    assert not bool(ui.root.attributes("-topmost")), "初始不应置顶"
+    assert ui.pin_btn.cget("text") == "置顶"
+    ui.pin_btn.event_generate("<Button-1>")
+    pump()
+    assert bool(ui.root.attributes("-topmost")), "置顶未生效"
+    assert ui.pin_btn.cget("text") == "已置顶"
+    with open(todo_window.STATE_PATH, "r", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved.get("topmost") is True, saved
+    ui.pin_btn.event_generate("<Button-1>")
+    pump()
+    assert not bool(ui.root.attributes("-topmost")), "取消置顶未生效"
+    assert ui.pin_btn.cget("text") == "置顶"
+    print("置顶：切换 / 按钮状态 / 立即落盘 OK")
+
+    saved["topmost"] = True
+    with open(todo_window.STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(saved, f)
+    ui._topmost = False
+    ui._restore_geometry()
+    ui._apply_topmost()
+    assert ui._topmost is True and bool(ui.root.attributes("-topmost")), \
+        "重开未恢复置顶"
+    print("置顶：重开自动恢复 OK")
 
     ui.on_close()
     st.close()

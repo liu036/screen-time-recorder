@@ -159,6 +159,7 @@ class TodoApp:
         self._scroll_visible = False  # 滚动条当前是否已 pack
         self._scrollable = False      # 内容是否真的溢出（滚轮是否生效）
         self._scroll_pending = False  # _sync_scroll 的 after_idle 去重
+        self._topmost = False       # 窗口置顶状态（写入 todo_window.json，重开恢复）
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -166,6 +167,9 @@ class TodoApp:
         self._f_small = tkfont.Font(family="Microsoft YaHei UI", size=8)
         self._restore_geometry()
         self._build()
+        self._apply_topmost()
+        # 窗口映射后再确认一次，避免部分环境在未映射时设置不生效
+        self.root.after_idle(self._apply_topmost)
         self.refresh()
         if focus_input:
             self.root.after(120, self._start_new_row)
@@ -216,6 +220,33 @@ class TodoApp:
         self.add_btn.bind("<Button-1>", lambda e: self._start_new_row(e))
         self.add_btn.bind("<Enter>", lambda e: self._draw_add_btn(True))
         self.add_btn.bind("<Leave>", lambda e: self._draw_add_btn(False))
+
+        # 置顶开关：点一下让窗口保持在其他窗口之上，状态会记住
+        self.pin_btn = tk.Label(bottom, text="置顶", font=F_SMALL,
+                                fg=MUTED, bg=BG, padx=8, pady=4,
+                                cursor="hand2")
+        self.pin_btn.pack(side="right", padx=(0, 8))
+        self.pin_btn.bind("<Button-1>", self.toggle_topmost)
+
+    def _apply_topmost(self):
+        """把置顶状态同步到窗口属性与按钮外观。"""
+        try:
+            self.root.attributes("-topmost", bool(self._topmost))
+        except Exception:
+            pass
+        try:
+            if self._topmost:
+                self.pin_btn.configure(text="已置顶", bg=ACCENT, fg="#FFFFFF")
+            else:
+                self.pin_btn.configure(text="置顶", bg=BG, fg=MUTED)
+        except Exception:
+            pass
+
+    def toggle_topmost(self, _e=None):
+        """切换置顶并立即落盘（不等关窗），重开自动恢复。"""
+        self._topmost = not self._topmost
+        self._apply_topmost()
+        self._save_geometry()
 
     def _draw_add_btn(self, hover):
         """纯 + 号圆形按钮（取代常驻输入框）。"""
@@ -753,9 +784,11 @@ class TodoApp:
 
     # ---- 窗口状态 ----
     def _restore_geometry(self):
+        """恢复窗口位置与置顶状态。"""
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 st = json.load(f)
+            self._topmost = bool(st.get("topmost", False))
             w, h = st.get("w", config.TODO_WINDOW_SIZE[0]), st.get("h", config.TODO_WINDOW_SIZE[1])
             x, y = st.get("x"), st.get("y")
             if x is None or y is None:
@@ -783,6 +816,7 @@ class TodoApp:
         return x, y
 
     def _save_geometry(self):
+        """保存窗口位置与置顶状态（切换置顶时也会立即调用）。"""
         try:
             geo = self.root.geometry()  # WxH+X+Y
             size, x, y = geo.split("+")[0], geo.split("+")[1], geo.split("+")[2]
@@ -790,7 +824,8 @@ class TodoApp:
             os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
             with open(STATE_PATH, "w", encoding="utf-8") as f:
                 json.dump({"w": int(w), "h": int(h),
-                           "x": int(x), "y": int(y)}, f)
+                           "x": int(x), "y": int(y),
+                           "topmost": bool(self._topmost)}, f)
         except Exception:
             pass
 
