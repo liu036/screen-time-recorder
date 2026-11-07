@@ -38,6 +38,8 @@ MUTED = "#8A8578"
 FAINT = "#E2DCCC"
 LINE = "#EAE4D5"
 CHK_BORDER = "#C9C2B0"
+# 优先级：低 / 中 / 高
+PRIO_COLORS = ("#D9D3C4", "#43593B", "#D4A017")
 ACCENT = "#D4A017"
 DANGER = "#C0553B"
 DONE = "#A9A395"
@@ -77,39 +79,6 @@ def fmt_when(ts):
     if d == today + timedelta(days=1):
         return "明天 " + hm
     return d.strftime("%m-%d") + " " + hm
-
-
-def parse_when(text):
-    """支持：'2026-11-05 18:00' / '11-05 18:00' / '18:00'；空串 → None。"""
-    s = (text or "").strip()
-    if not s:
-        return None
-    now = datetime.now()
-    try:
-        if len(s) <= 5 and ":" in s:
-            h, m = s.split(":")
-            cand = now.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
-            if cand < now:
-                cand += timedelta(days=1)
-            return int(cand.timestamp() * 1000)
-        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%m-%d %H:%M"):
-            try:
-                dt = datetime.strptime(s, fmt)
-                if fmt == "%m-%d %H:%M":
-                    dt = dt.replace(year=now.year)
-                return int(dt.timestamp() * 1000)
-            except ValueError:
-                continue
-        dt = datetime.strptime(s, "%Y-%m-%d")
-        return int(dt.timestamp() * 1000)
-    except ValueError:
-        return None
-
-
-def to_input(ts):
-    if not ts:
-        return ""
-    return datetime.fromtimestamp(ts / 1000.0).strftime("%Y-%m-%d %H:%M")
 
 
 def _ellipsize(text, font, max_px):
@@ -172,7 +141,7 @@ class TodoApp:
         self._last_sig = None
         self._last_w = None
         self._resize_after = None
-        self._focus_input = focus_input
+        self._editing = False       # 行内编辑/新建期间暂停轮询重建
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -182,33 +151,14 @@ class TodoApp:
         self._build()
         self.refresh()
         if focus_input:
-            self.root.after(120, self.entry.focus_set)
+            self.root.after(120, self._start_new_row)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.bind("<Control-n>", lambda e: self.entry.focus_set())
         self.root.bind("<F5>", lambda e: self.refresh())
         self.root.bind("<Configure>", self._on_resize)
 
     # ---- 布局 ----
     def _build(self):
-        # 快速添加
-        top = tk.Frame(self.root, bg=BG, padx=12, pady=10)
-        top.pack(fill="x")
-        self.entry = tk.Entry(
-            top, font=F_TITLE, bg=CARD, fg=INK, relief="flat",
-            insertbackground=INK, highlightthickness=1,
-            highlightbackground=FAINT, highlightcolor=ACCENT)
-        self.entry.pack(fill="x", ipady=7)
-        self._placeholder = "添加待办，回车确认…"
-        self.entry.insert(0, self._placeholder)
-        self.entry.configure(fg=MUTED)
-        self.entry.bind("<FocusIn>", self._entry_focus_in)
-        self.entry.bind("<FocusOut>", self._entry_focus_out)
-        self.entry.bind("<Return>", self.on_add)
-        tk.Label(top, text="回车添加 · Ctrl+N 聚焦 · 双击编辑",
-                 font=F_SMALL, fg=MUTED, bg=BG, anchor="w").pack(
-            fill="x", pady=(5, 0))
-
-        # 筛选
+        # 筛选（保留现状）
         tabs = tk.Frame(self.root, bg=BG, padx=12)
         tabs.pack(fill="x", pady=(0, 6))
         self.tab_btns = {}
@@ -235,10 +185,28 @@ class TodoApp:
         self.canvas.bind("<Configure>", self._on_canvas)
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
 
-        # 底部状态
-        self.status = tk.Label(self.root, text="", font=F_SMALL, fg=MUTED,
-                               bg=BG, anchor="w", padx=14, pady=8)
-        self.status.pack(fill="x")
+        # 底部：状态 + 纯 + 号新建按钮
+        bottom = tk.Frame(self.root, bg=BG)
+        bottom.pack(fill="x", padx=12, pady=(4, 10))
+        self.status = tk.Label(bottom, text="", font=F_SMALL, fg=MUTED,
+                               bg=BG, anchor="w")
+        self.status.pack(side="left")
+        self.add_btn = tk.Canvas(bottom, width=34, height=34, bg=BG,
+                                 highlightthickness=0, bd=0, cursor="hand2")
+        self.add_btn.pack(side="right")
+        self._draw_add_btn(False)
+        self.add_btn.bind("<Button-1>", lambda e: self._start_new_row())
+        self.add_btn.bind("<Enter>", lambda e: self._draw_add_btn(True))
+        self.add_btn.bind("<Leave>", lambda e: self._draw_add_btn(False))
+
+    def _draw_add_btn(self, hover):
+        """纯 + 号圆形按钮（取代常驻输入框）。"""
+        c = self.add_btn
+        c.delete("all")
+        color = "#B5650F" if hover else ACCENT
+        c.create_oval(2, 2, 32, 32, fill=color, outline=color)
+        c.create_line(11, 17, 23, 17, fill="#FFFFFF", width=2)
+        c.create_line(17, 11, 17, 23, fill="#FFFFFF", width=2)
 
     def _on_inner(self, _e=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -290,6 +258,10 @@ class TodoApp:
             self._schedule()
             return
         self._offline = False
+        # 行内编辑/新建期间不重建列表，否则输入框会被 3 秒轮询吃掉
+        if self._editing:
+            self._schedule()
+            return
         # 数据没变就不重建 DOM：省内存/CPU，也不会打断滚动和悬停
         sig = json.dumps([data, summary], sort_keys=True, ensure_ascii=False)
         if sig != self._last_sig:
@@ -303,7 +275,7 @@ class TodoApp:
             w.destroy()
         self._rows = todos
         if not todos:
-            tk.Label(self.inner, text="没有待办，上方输入即可添加",
+            tk.Label(self.inner, text="没有待办，点右下角 ＋ 添加",
                      font=F_BODY, fg=MUTED, bg=BG, pady=24).pack()
         else:
             for item in todos:
@@ -341,11 +313,14 @@ class TodoApp:
             chk.create_oval(2, 2, 18, 18, outline=CHK_BORDER, width=1.6)
         chk.bind("<Button-1>", lambda e, t=item: self.toggle_done(t))
 
-        # 优先级细条
+        # 优先级圆点：点击循环 低 → 中 → 高 → 低
         pr = item.get("priority", 1)
-        bar_color = ACCENT if pr == 2 else (FAINT if pr == 1 else LINE)
-        tk.Frame(row, bg=bar_color, width=3).pack(side="left", fill="y",
-                                                  pady=12, padx=(0, 8))
+        pri = tk.Canvas(row, width=14, height=20, bg=BG,
+                        highlightthickness=0, bd=0, cursor="hand2")
+        pri.pack(side="left", padx=(0, 6))
+        pri.create_oval(3, 7, 11, 15, fill=PRIO_COLORS[pr], outline="")
+        pri.bind("<Button-1>",
+                 lambda e, t=item, p=pr: self._cycle_priority(t, p))
 
         # 先放右侧（时间/删除）：pack 按调用顺序分配空间，
         # 若标题先 pack 并 expand，长标题会把右侧控件挤出可视区。
@@ -362,22 +337,24 @@ class TodoApp:
                                 fg=DANGER if overdue else MUTED)
             time_lbl.pack(side="right", padx=(6, 2))
 
-        # 标题：按可用宽度截断，避免撑破布局
+        # 标题：单击就地编辑（不再开模态对话框）
         title_fg = DONE if is_done else INK
         font = self._f_title_hi if (pr == 2 and not is_done) else self._f_title
-        # 左侧勾选(20+12) + 优先级条(3+8)，右侧删除(≈26)，再留边距
+        # 左侧勾选(20+12) + 优先级圆点(14+6)，右侧删除(≈26)，再留边距
         win_w = self.root.winfo_width()
         if win_w <= 1:  # 首次渲染时窗口尚未映射
             win_w = config.TODO_WINDOW_SIZE[0]
-        avail = max(80, win_w - 85)
+        avail = max(80, win_w - 90)
         if time_lbl is not None:
             avail -= self._f_small.measure(ts_text) + 14
         shown = _ellipsize(item["title"], font, avail)
         title = tk.Label(row, text=shown, font=font, fg=title_fg,
-                         bg=BG, anchor="w", justify="left")
+                         bg=BG, anchor="w", justify="left", cursor="xterm")
         title.pack(side="left", fill="x", expand=True)
+        title.bind("<Button-1>",
+                   lambda e, t=item, w=title: self._start_inline_edit(t, w))
 
-        # 悬停高亮 + 双击编辑
+        # 悬停高亮
         def enter(_e, r=row):
             r.configure(bg=CARD)
             dele.configure(fg=DANGER)
@@ -401,7 +378,6 @@ class TodoApp:
         for w in (row, title):
             w.bind("<Enter>", enter)
             w.bind("<Leave>", leave)
-            w.bind("<Double-Button-1>", lambda e, t=item: self.open_editor(t))
 
         tk.Frame(self.inner, bg=LINE, height=1).pack(fill="x", padx=14)
 
@@ -429,29 +405,88 @@ class TodoApp:
         self.filter = key
         self.refresh()
 
-    def _entry_focus_in(self, _e=None):
-        if self.entry.get() == self._placeholder:
-            self.entry.delete(0, "end")
-            self.entry.configure(fg=INK)
-
-    def _entry_focus_out(self, _e=None):
-        if not self.entry.get().strip():
-            self.entry.delete(0, "end")
-            self.entry.insert(0, self._placeholder)
-            self.entry.configure(fg=MUTED)
-
-    def on_add(self, _e=None):
-        text = self.entry.get().strip()
-        if not text or text == self._placeholder:
+    def _start_new_row(self):
+        """点击右下角 ＋：在列表末尾插入一行输入框，不切视图。"""
+        if self._editing:
             return
+        self._editing = True
+        row = tk.Frame(self.inner, bg=BG, height=46)
+        row.pack(fill="x", padx=8)
+        row.pack_propagate(False)
+        e = tk.Entry(row, font=F_TITLE, bg=CARD, fg=INK, relief="flat",
+                     insertbackground=INK, highlightthickness=1,
+                     highlightbackground=ACCENT, highlightcolor=ACCENT)
+        e.pack(fill="x", padx=(4, 30), ipady=5, pady=6)
+        self.inner.update_idletasks()
+        self._on_inner()
+        self.canvas.yview_moveto(1.0)
+        e.focus_set()
+        state = {"done": False}
+
+        def finish(save):
+            if state["done"]:
+                return
+            state["done"] = True
+            text = e.get().strip()
+            row.destroy()
+            self._editing = False
+            self._last_sig = None
+            if save and text:
+                try:
+                    api("/api/todos", "POST", {"title": text})
+                except Exception as ex:
+                    messagebox.showerror("添加失败", str(ex), parent=self.root)
+            self.refresh()
+
+        e.bind("<Return>", lambda ev: finish(True))
+        e.bind("<Escape>", lambda ev: finish(False))
+        e.bind("<FocusOut>", lambda ev: finish(True))
+
+    def _start_inline_edit(self, item, label):
+        """单击标题：该行原地变输入框，Enter 保存 / Esc 取消 / 失焦保存。"""
+        if self._editing:
+            return
+        self._editing = True
+        label.update_idletasks()
+        e = tk.Entry(label, font=label.cget("font"), bg=CARD, fg=INK,
+                     relief="flat", insertbackground=INK,
+                     highlightthickness=1, highlightbackground=ACCENT,
+                     highlightcolor=ACCENT)
+        e.insert(0, item["title"])
+        e.select_range(0, "end")
+        e.place(x=0, y=-3, width=max(120, label.winfo_width()), height=30)
+        e.focus_set()
+        state = {"done": False}
+
+        def commit(save=True):
+            if state["done"]:
+                return
+            state["done"] = True
+            text = e.get().strip()
+            e.destroy()
+            self._editing = False
+            self._last_sig = None
+            if save and text and text != item["title"]:
+                try:
+                    api("/api/todos/%d" % item["id"], "PATCH",
+                        {"title": text})
+                except Exception as ex:
+                    messagebox.showerror("保存失败", str(ex), parent=self.root)
+            self.refresh()
+
+        e.bind("<Return>", lambda ev: commit(True))
+        e.bind("<Escape>", lambda ev: commit(False))
+        e.bind("<FocusOut>", lambda ev: commit(True))
+
+    def _cycle_priority(self, item, current):
+        """点击优先级圆点：低 → 中 → 高 → 低，立即写库。"""
+        new = (int(current or 1) + 1) % 3
         try:
-            api("/api/todos", "POST", {"title": text})
+            api("/api/todos/%d" % item["id"], "PATCH", {"priority": new})
         except Exception as e:
-            messagebox.showerror("添加失败", str(e), parent=self.root)
+            messagebox.showerror("操作失败", str(e), parent=self.root)
             return
-        self.entry.delete(0, "end")
-        self.entry.configure(fg=INK)
-        self.entry.focus_set()
+        self._last_sig = None
         self.refresh()
 
     def toggle_done(self, item):
@@ -464,90 +499,14 @@ class TodoApp:
         self.refresh()
 
     def on_delete(self, item):
-        if not messagebox.askyesno("删除待办", "删除「%s」？" % item["title"],
-                                   parent=self.root):
-            return
+        """点 × 直接删除：无确认弹窗、无撤销。"""
         try:
             api("/api/todos/%d" % item["id"], "DELETE")
         except Exception as e:
             messagebox.showerror("删除失败", str(e), parent=self.root)
             return
+        self._last_sig = None
         self.refresh()
-
-    # ---- 编辑对话框 ----
-    def open_editor(self, item):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("编辑待办")
-        dlg.configure(bg=BG)
-        dlg.geometry("340x360")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        def field(label, value, show=None):
-            tk.Label(dlg, text=label, font=F_SMALL, fg=MUTED, bg=BG,
-                     anchor="w").pack(fill="x", padx=16, pady=(10, 2))
-            e = tk.Entry(dlg, font=F_BODY, bg=CARD, fg=INK, relief="flat",
-                         highlightthickness=1, highlightbackground=FAINT,
-                         highlightcolor=ACCENT, show=show)
-            e.insert(0, value or "")
-            e.pack(fill="x", padx=16, ipady=5)
-            return e
-
-        e_title = field("标题", item["title"])
-        tk.Label(dlg, text="备注", font=F_SMALL, fg=MUTED, bg=BG,
-                 anchor="w").pack(fill="x", padx=16, pady=(10, 2))
-        e_note = tk.Text(dlg, height=3, font=F_BODY, bg=CARD, fg=INK,
-                         relief="flat", highlightthickness=1,
-                         highlightbackground=FAINT, highlightcolor=ACCENT)
-        e_note.insert("1.0", item.get("note") or "")
-        e_note.pack(fill="x", padx=16)
-
-        e_due = field("截止时间（2026-11-05 18:00，留空=无）",
-                      to_input(item.get("due_ts")))
-        e_rem = field("提醒时间（18:00 表示今天/明天该时刻）",
-                      to_input(item.get("remind_ts")))
-
-        tk.Label(dlg, text="优先级", font=F_SMALL, fg=MUTED, bg=BG,
-                 anchor="w").pack(fill="x", padx=16, pady=(10, 2))
-        pr = tk.IntVar(value=item.get("priority", 1))
-        prow = tk.Frame(dlg, bg=BG)
-        prow.pack(fill="x", padx=12)
-        for v, label in ((0, "低"), (1, "中"), (2, "高")):
-            tk.Radiobutton(prow, text=label, value=v, variable=pr,
-                           font=F_SMALL, bg=BG, fg=INK, selectcolor=CARD,
-                           activebackground=BG, highlightthickness=0
-                           ).pack(side="left")
-
-        def save():
-            title = e_title.get().strip()
-            if not title:
-                messagebox.showwarning("提示", "标题不能为空", parent=dlg)
-                return
-            body = {
-                "title": title,
-                "note": e_note.get("1.0", "end").strip(),
-                "due_ts": parse_when(e_due.get()),
-                "remind_ts": parse_when(e_rem.get()),
-                "priority": pr.get(),
-            }
-            try:
-                api("/api/todos/%d" % item["id"], "PATCH", body)
-            except Exception as e:
-                messagebox.showerror("保存失败", str(e), parent=dlg)
-                return
-            dlg.destroy()
-            self.refresh()
-
-        btns = tk.Frame(dlg, bg=BG)
-        btns.pack(fill="x", padx=16, pady=16)
-        tk.Button(btns, text="保存", command=save, font=F_BODY,
-                  bg=INK, fg="#F7F4EC", relief="flat", padx=16, pady=5,
-                  activebackground=INK, cursor="hand2").pack(side="right")
-        tk.Button(btns, text="取消", command=dlg.destroy, font=F_BODY,
-                  bg=BG, fg=MUTED, relief="flat", padx=12, pady=5,
-                  cursor="hand2").pack(side="right", padx=6)
-        e_title.focus_set()
-        dlg.bind("<Escape>", lambda e: dlg.destroy())
 
     # ---- 窗口状态 ----
     def _restore_geometry(self):
