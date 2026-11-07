@@ -54,8 +54,24 @@ def main():
 
     from screen_time_recorder import todo_window
     todo_window.STATE_PATH = os.path.join(tempfile.mkdtemp(), "win_state.json")
+
+    # 优先级三态循环（回归：曾因 `current or 1` 退化成灰/高两态）
+    assert [todo_window.next_priority(i) for i in (0, 1, 2)] == [1, 2, 0]
+    assert todo_window.PRIO_COLORS[2] == "#C0553B", "最高级应为红色"
+    print("优先级三态循环 0→1→2→0 / 最高级红色 OK")
+
     ui = todo_window.TodoApp()
     ui.root.update()
+
+    def wait_for(pred, timeout=3.0):
+        """等待后台写线程 + Tk 回调完成。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            ui.root.update()
+            if pred():
+                return True
+            time.sleep(0.02)
+        return False
 
     # 1) 没有常驻输入框，只有 + 号按钮
     assert not hasattr(ui, "entry"), "顶部常驻输入框未移除"
@@ -72,9 +88,9 @@ def main():
     e = entries[0]
     e.insert(0, "新待办：验证加号")
     e.event_generate("<Return>")
-    ui.root.update()
-    titles = [t["title"] for t in st.list_todos("all")]
-    assert "新待办：验证加号" in titles, titles
+    assert wait_for(lambda: any(
+        t["title"] == "新待办：验证加号" for t in st.list_todos("all"))), \
+        st.list_todos("all")
     print("+ 号 → 行内新建 → 回车写入 OK")
 
     # 3) 单击标题 → 原地变输入框 → 回车保存
@@ -97,28 +113,29 @@ def main():
     inline[0].delete(0, "end")
     inline[0].insert(0, "交周报（已改）")
     inline[0].event_generate("<Return>")
-    ui.root.update()
     assert ui._editing is False
-    assert any(t["title"] == "交周报（已改）" for t in st.list_todos("all"))
+    assert wait_for(lambda: any(
+        t["title"] == "交周报（已改）" for t in st.list_todos("all")))
     print("单击标题 → 行内编辑 → 回车保存（轮询不打断）OK")
 
     # 4) 优先级圆点点击循环
     item = [t for t in st.list_todos("all")
             if t["title"] == "交周报（已改）"][0]
     old = item["priority"]
-    ui._cycle_priority(item, old)
-    ui.root.update()
-    new = [t for t in st.list_todos("all") if t["id"] == item["id"]][0]
-    assert new["priority"] == (old + 1) % 3, (old, new["priority"])
-    print("优先级循环 %d → %d OK" % (old, new["priority"]))
+    expected = todo_window.next_priority(old)
+    ui._cycle_priority(item, None, None)   # 本用例不校验圆点重绘
+    assert wait_for(lambda: [t for t in st.list_todos("all")
+                             if t["id"] == item["id"]][0]["priority"]
+                    == expected)
+    print("优先级循环 %d → %d OK" % (old, expected))
 
     # 5) 点 × 直接删除，不弹确认框
     victim = [t for t in st.list_todos("all")
               if t["title"] == "回复供应商"][0]
     before = len(st.list_todos("all"))
     ui.on_delete(victim)
-    ui.root.update()
-    assert len(st.list_todos("all")) == before - 1, "删除未生效"
+    assert wait_for(lambda: len(st.list_todos("all")) == before - 1), \
+        "删除未生效"
     assert not [w for w in ui.root.winfo_children()
                 if isinstance(w, tk.Toplevel)], "删除不应产生对话框"
     print("点 × 直接删除（无确认弹窗）OK")

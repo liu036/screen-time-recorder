@@ -15,6 +15,7 @@ import ctypes
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -38,8 +39,8 @@ MUTED = "#8A8578"
 FAINT = "#E2DCCC"
 LINE = "#EAE4D5"
 CHK_BORDER = "#C9C2B0"
-# 优先级：低 / 中 / 高
-PRIO_COLORS = ("#D9D3C4", "#43593B", "#D4A017")
+# 优先级：低 / 中 / 高（高 = 红色）
+PRIO_COLORS = ("#D9D3C4", "#43593B", "#C0553B")
 ACCENT = "#D4A017"
 DANGER = "#C0553B"
 DONE = "#A9A395"
@@ -79,6 +80,15 @@ def fmt_when(ts):
     if d == today + timedelta(days=1):
         return "明天 " + hm
     return d.strftime("%m-%d") + " " + hm
+
+
+def next_priority(current):
+    """低(0) → 中(1) → 高(2) → 低(0)。
+
+    注意不能写 `current or 1`：0 会被吞成 1，循环就退化成灰/高两态。
+    """
+    cur = min(max(int(current if current is not None else 1), 0), 2)
+    return (cur + 1) % 3
 
 
 def _ellipsize(text, font, max_px):
@@ -142,6 +152,7 @@ class TodoApp:
         self._last_w = None
         self._resize_after = None
         self._editing = False       # 行内编辑/新建期间暂停轮询重建
+        self._write_seq = 0         # 丢弃过期写请求的回读结果
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -235,9 +246,57 @@ class TodoApp:
         except Exception:
             pass
 
-    # ---- 刷新 ----
+    # ---- 刷新与异步写入 ----
     def _schedule(self):
         self._after_id = self.root.after(config.TODO_POLL_MS, self.refresh)
+
+    def _write(self, path, method, body, on_success=None):
+        """后台线程完成写操作并回读视图数据；主线程只更新签名/状态，不重建 UI。
+
+        Tk 是单线程事件循环，任何同步 HTTP 都会冻结界面，所以写操作一律异步。
+        """
+        flt = self.filter
+        self._write_seq += 1
+        seq = self._write_seq
+
+        def worker():
+            try:
+                result = api(path, method, body)
+                data = api("/api/todos?filter=" + flt)["todos"]
+                summary = api("/api/todos/summary")
+                err = None
+            except Exception as ex:
+                result = data = summary = None
+                err = ex
+            try:
+                self.root.after(0, lambda: self._after_write(
+                    result, data, summary, err, on_success, seq))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True,
+                         name="todo-write").start()
+
+    def _after_write(self, result, data, summary, err,
+                     on_success=None, seq=None):
+        if err is not None:
+            messagebox.showerror("操作失败", str(err), parent=self.root)
+            self._last_sig = None
+            self.refresh()          # 失败才回滚显示
+            return
+        if on_success is not None:
+            try:
+                on_success(result)
+            except Exception:
+                pass
+        # 快速连点时只认最后一次写的回读结果，避免状态被旧请求回退
+        if seq is not None and seq != self._write_seq:
+            return
+        if data is not None:
+            self._rows = data
+            self._last_sig = json.dumps(
+                [data, summary], sort_keys=True, ensure_ascii=False)
+            self._update_status(summary)
 
     def refresh(self):
         if self._after_id:
@@ -246,6 +305,10 @@ class TodoApp:
             except Exception:
                 pass
             self._after_id = None
+        # 行内编辑/新建期间完全跳过（连请求都不发），避免输入框被重建
+        if self._editing:
+            self._schedule()
+            return
         try:
             data = api("/api/todos?filter=" + self.filter)["todos"]
             summary = api("/api/todos/summary")
@@ -258,10 +321,6 @@ class TodoApp:
             self._schedule()
             return
         self._offline = False
-        # 行内编辑/新建期间不重建列表，否则输入框会被 3 秒轮询吃掉
-        if self._editing:
-            self._schedule()
-            return
         # 数据没变就不重建 DOM：省内存/CPU，也不会打断滚动和悬停
         sig = json.dumps([data, summary], sort_keys=True, ensure_ascii=False)
         if sig != self._last_sig:
@@ -281,6 +340,14 @@ class TodoApp:
             for item in todos:
                 self._render_row(item)
         self._update_tabs(summary)
+        self._update_status(summary)
+        # 不在这里强制 update_idletasks()：它会同步重排全部子控件，
+        # 20 行约 100ms，是点击后界面卡顿的主因。滚动区域交给空闲回调。
+        self.root.after_idle(self._on_inner)
+        if pos:
+            self.canvas.yview_moveto(pos)
+
+    def _update_status(self, summary):
         total = summary.get("open", 0)
         overdue = summary.get("overdue", 0)
         done_today = summary.get("done_today", 0)
@@ -291,36 +358,28 @@ class TodoApp:
         self.status.configure(
             text="  ·  ".join(parts),
             fg=DANGER if overdue else MUTED)
-        self.inner.update_idletasks()
-        self._on_inner()
-        if pos:
-            self.canvas.yview_moveto(pos)
 
     def _render_row(self, item):
-        row = tk.Frame(self.inner, bg=BG, height=46)
+        # outer 把「行 + 分隔线」包成整体，删除时可一次销毁
+        outer = tk.Frame(self.inner, bg=BG)
+        outer.pack(fill="x")
+        row = tk.Frame(outer, bg=BG, height=46)
         row.pack(fill="x", padx=8)
         row.pack_propagate(False)
 
         is_done = item["status"] == "done"
-        # 完成勾选（自绘圆形，避免 ttk 主题带来的灰底）
+        # 完成勾选（绘制延后到 title 就绪后）
         chk = tk.Canvas(row, width=20, height=20, bg=BG,
                         highlightthickness=0, bd=0, cursor="hand2")
         chk.pack(side="left", padx=(4, 8))
-        if is_done:
-            chk.create_oval(2, 2, 18, 18, fill=DONE, outline=DONE)
-            chk.create_line(6, 10, 9, 13, 14, 6, fill="#FFFFFF", width=2)
-        else:
-            chk.create_oval(2, 2, 18, 18, outline=CHK_BORDER, width=1.6)
-        chk.bind("<Button-1>", lambda e, t=item: self.toggle_done(t))
 
-        # 优先级圆点：点击循环 低 → 中 → 高 → 低
+        # 优先级圆点：点击循环 低 → 中 → 高(红) → 低
         pr = item.get("priority", 1)
+        pr = min(max(int(pr if pr is not None else 1), 0), 2)
         pri = tk.Canvas(row, width=14, height=20, bg=BG,
                         highlightthickness=0, bd=0, cursor="hand2")
         pri.pack(side="left", padx=(0, 6))
-        pri.create_oval(3, 7, 11, 15, fill=PRIO_COLORS[pr], outline="")
-        pri.bind("<Button-1>",
-                 lambda e, t=item, p=pr: self._cycle_priority(t, p))
+        oval = pri.create_oval(3, 7, 11, 15, fill=PRIO_COLORS[pr], outline="")
 
         # 先放右侧（时间/删除）：pack 按调用顺序分配空间，
         # 若标题先 pack 并 expand，长标题会把右侧控件挤出可视区。
@@ -329,7 +388,6 @@ class TodoApp:
         dele = tk.Label(row, text="×", font=("Microsoft YaHei UI", 12),
                         fg=CHK_BORDER, bg=BG, cursor="hand2", padx=4)
         dele.pack(side="right", padx=(0, 2))
-        dele.bind("<Button-1>", lambda e, t=item: self.on_delete(t))
         time_lbl = None
         if ts_text:
             overdue = (not is_done) and ts < datetime.now().timestamp() * 1000
@@ -338,9 +396,7 @@ class TodoApp:
             time_lbl.pack(side="right", padx=(6, 2))
 
         # 标题：单击就地编辑（不再开模态对话框）
-        title_fg = DONE if is_done else INK
         font = self._f_title_hi if (pr == 2 and not is_done) else self._f_title
-        # 左侧勾选(20+12) + 优先级圆点(14+6)，右侧删除(≈26)，再留边距
         win_w = self.root.winfo_width()
         if win_w <= 1:  # 首次渲染时窗口尚未映射
             win_w = config.TODO_WINDOW_SIZE[0]
@@ -348,14 +404,38 @@ class TodoApp:
         if time_lbl is not None:
             avail -= self._f_small.measure(ts_text) + 14
         shown = _ellipsize(item["title"], font, avail)
-        title = tk.Label(row, text=shown, font=font, fg=title_fg,
+        title = tk.Label(row, text=shown, font=font,
+                         fg=DONE if is_done else INK,
                          bg=BG, anchor="w", justify="left", cursor="xterm")
         title.pack(side="left", fill="x", expand=True)
-        title.bind("<Button-1>",
-                   lambda e, t=item, w=title: self._start_inline_edit(t, w))
 
-        # 悬停高亮
+        # 局部重绘完成状态，不重建整行
+        def set_done(done):
+            chk.delete("all")
+            if done:
+                chk.create_oval(2, 2, 18, 18, fill=DONE, outline=DONE)
+                chk.create_line(6, 10, 9, 13, 14, 6, fill="#FFFFFF", width=2)
+                title.configure(fg=DONE, font=self._f_title)
+            else:
+                chk.create_oval(2, 2, 18, 18, outline=CHK_BORDER, width=1.6)
+                title.configure(fg=INK, font=font)
+
+        set_done(is_done)
+        chk.bind("<Button-1>",
+                 lambda e, t=item, f=set_done: self.toggle_done(t, f))
+        pri.bind("<Button-1>",
+                 lambda e, t=item, c=pri, o=oval:
+                 self._cycle_priority(t, c, o))
+        dele.bind("<Button-1>",
+                  lambda e, t=item, w=outer: self.on_delete(t, w))
+        title.bind("<Button-1>",
+                   lambda e, t=item, w=title, f=font:
+                   self._start_inline_edit(t, w, f))
+
+        # 悬停高亮（编辑期间跳过，避免反复重绘干扰输入）
         def enter(_e, r=row):
+            if self._editing:
+                return
             r.configure(bg=CARD)
             dele.configure(fg=DANGER)
             for c in r.winfo_children():
@@ -366,6 +446,8 @@ class TodoApp:
                         pass
 
         def leave(_e, r=row):
+            if self._editing:
+                return
             r.configure(bg=BG)
             dele.configure(fg=CHK_BORDER)
             for c in r.winfo_children():
@@ -379,7 +461,8 @@ class TodoApp:
             w.bind("<Enter>", enter)
             w.bind("<Leave>", leave)
 
-        tk.Frame(self.inner, bg=LINE, height=1).pack(fill="x", padx=14)
+        tk.Frame(outer, bg=LINE, height=1).pack(fill="x", padx=14)
+        return outer
 
     def _render_offline(self, err):
         for w in self.inner.winfo_children():
@@ -417,9 +500,12 @@ class TodoApp:
                      insertbackground=INK, highlightthickness=1,
                      highlightbackground=ACCENT, highlightcolor=ACCENT)
         e.pack(fill="x", padx=(4, 30), ipady=5, pady=6)
-        self.inner.update_idletasks()
-        self._on_inner()
-        self.canvas.yview_moveto(1.0)
+
+        def reveal():
+            self._on_inner()
+            self.canvas.yview_moveto(1.0)
+
+        self.root.after_idle(reveal)
         e.focus_set()
         state = {"done": False}
 
@@ -430,83 +516,114 @@ class TodoApp:
             text = e.get().strip()
             row.destroy()
             self._editing = False
-            self._last_sig = None
-            if save and text:
-                try:
-                    api("/api/todos", "POST", {"title": text})
-                except Exception as ex:
-                    messagebox.showerror("添加失败", str(ex), parent=self.root)
-            self.refresh()
+            if not (save and text):
+                return                       # 取消：列表没变，无需刷新
+
+            def on_ok(result):
+                todo = (result or {}).get("todo")
+                if todo:
+                    self._render_row(todo)    # 只追加一行，不重建列表
+                    self.root.after_idle(self._on_inner)
+
+            self._write("/api/todos", "POST", {"title": text},
+                        on_success=on_ok)
 
         e.bind("<Return>", lambda ev: finish(True))
         e.bind("<Escape>", lambda ev: finish(False))
         e.bind("<FocusOut>", lambda ev: finish(True))
 
-    def _start_inline_edit(self, item, label):
+    def _start_inline_edit(self, item, label, font=None):
         """单击标题：该行原地变输入框，Enter 保存 / Esc 取消 / 失焦保存。"""
         if self._editing:
             return
         self._editing = True
-        label.update_idletasks()
-        e = tk.Entry(label, font=label.cget("font"), bg=CARD, fg=INK,
-                     relief="flat", insertbackground=INK,
-                     highlightthickness=1, highlightbackground=ACCENT,
-                     highlightcolor=ACCENT)
+        font = font or self._f_title
+        w = label.winfo_width()
+        if w <= 1:
+            w = max(120, self.root.winfo_width() - 120)
+        e = tk.Entry(label, font=font, bg=CARD, fg=INK, relief="flat",
+                     insertbackground=INK, highlightthickness=1,
+                     highlightbackground=ACCENT, highlightcolor=ACCENT)
         e.insert(0, item["title"])
         e.select_range(0, "end")
-        e.place(x=0, y=-3, width=max(120, label.winfo_width()), height=30)
+        e.place(x=0, y=-3, width=max(120, w), height=30)
         e.focus_set()
-        state = {"done": False}
+        state = {"done": False, "pending": None}
+
+        def cancel_pending():
+            if state["pending"] is not None:
+                try:
+                    self.root.after_cancel(state["pending"])
+                except Exception:
+                    pass
+                state["pending"] = None
 
         def commit(save=True):
             if state["done"]:
                 return
             state["done"] = True
+            cancel_pending()
             text = e.get().strip()
             e.destroy()
             self._editing = False
-            self._last_sig = None
-            if save and text and text != item["title"]:
-                try:
-                    api("/api/todos/%d" % item["id"], "PATCH",
+            if not (save and text and text != item["title"]):
+                return                        # 无改动：不写库、不重建
+            # 乐观更新：立刻改标题文字，网络在后台完成
+            try:
+                label.configure(
+                    text=_ellipsize(text, font,
+                                    max(80, label.winfo_width())))
+            except Exception:
+                pass
+            item["title"] = text
+            self._write("/api/todos/%d" % item["id"], "PATCH",
                         {"title": text})
-                except Exception as ex:
-                    messagebox.showerror("保存失败", str(ex), parent=self.root)
-            self.refresh()
+
+        def on_focus_out(_ev):
+            # 延迟 80ms：避免点击瞬间焦点抖动把输入框立刻提交掉
+            if state["done"]:
+                return
+            cancel_pending()
+            state["pending"] = self.root.after(80, lambda: commit(True))
 
         e.bind("<Return>", lambda ev: commit(True))
         e.bind("<Escape>", lambda ev: commit(False))
-        e.bind("<FocusOut>", lambda ev: commit(True))
+        e.bind("<FocusOut>", on_focus_out)
+        e.bind("<FocusIn>", lambda ev: cancel_pending())
 
-    def _cycle_priority(self, item, current):
-        """点击优先级圆点：低 → 中 → 高 → 低，立即写库。"""
-        new = (int(current or 1) + 1) % 3
+    def _cycle_priority(self, item, canvas, oval):
+        """点击优先级圆点：低 → 中 → 高(红) → 低，局部改色 + 后台写库。"""
+        cur = next((t.get("priority", 1) for t in self._rows
+                    if t["id"] == item["id"]), 1)
+        new = next_priority(cur)
         try:
-            api("/api/todos/%d" % item["id"], "PATCH", {"priority": new})
-        except Exception as e:
-            messagebox.showerror("操作失败", str(e), parent=self.root)
-            return
-        self._last_sig = None
-        self.refresh()
+            canvas.itemconfigure(oval, fill=PRIO_COLORS[new])
+        except Exception:
+            pass
+        for t in self._rows:
+            if t["id"] == item["id"]:
+                t["priority"] = new
+                break
+        self._write("/api/todos/%d" % item["id"], "PATCH",
+                    {"priority": new})
 
-    def toggle_done(self, item):
-        try:
-            api("/api/todos/%d/done" % item["id"], "POST",
-                {"done": item["status"] != "done"})
-        except Exception as e:
-            messagebox.showerror("操作失败", str(e), parent=self.root)
-            return
-        self.refresh()
+    def toggle_done(self, item, paint=None):
+        done = item["status"] != "done"
+        if paint is not None:
+            paint(done)                       # 局部重绘该行圆圈/标题
+        item["status"] = "done" if done else "open"
+        self._write("/api/todos/%d/done" % item["id"], "POST",
+                    {"done": done})
 
-    def on_delete(self, item):
-        """点 × 直接删除：无确认弹窗、无撤销。"""
-        try:
-            api("/api/todos/%d" % item["id"], "DELETE")
-        except Exception as e:
-            messagebox.showerror("删除失败", str(e), parent=self.root)
-            return
-        self._last_sig = None
-        self.refresh()
+    def on_delete(self, item, widget=None):
+        """点 × 直接删除：局部销毁该行，无确认弹窗、无撤销。"""
+        if widget is not None:
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+        self._rows = [t for t in self._rows if t["id"] != item["id"]]
+        self._write("/api/todos/%d" % item["id"], "DELETE", None)
 
     # ---- 窗口状态 ----
     def _restore_geometry(self):
