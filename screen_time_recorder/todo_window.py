@@ -155,6 +155,7 @@ class TodoApp:
         self._write_seq = 0         # 丢弃过期写请求的回读结果
         self._edit_entry = None     # 当前行内输入框（判断"点在自己身上"）
         self._edit_commit = None    # 当前编辑会话的提交函数（点空白时调用）
+        self._edit_start_serial = None  # 开启编辑那次点击的序号（不能被当成点空白）
         self._scroll_visible = False  # 滚动条当前是否已 pack
         self._scrollable = False      # 内容是否真的溢出（滚轮是否生效）
         self._scroll_pending = False  # _sync_scroll 的 after_idle 去重
@@ -212,7 +213,7 @@ class TodoApp:
                                  highlightthickness=0, bd=0, cursor="hand2")
         self.add_btn.pack(side="right")
         self._draw_add_btn(False)
-        self.add_btn.bind("<Button-1>", lambda e: self._start_new_row())
+        self.add_btn.bind("<Button-1>", lambda e: self._start_new_row(e))
         self.add_btn.bind("<Enter>", lambda e: self._draw_add_btn(True))
         self.add_btn.bind("<Leave>", lambda e: self._draw_add_btn(False))
 
@@ -498,7 +499,7 @@ class TodoApp:
                   lambda e, t=item, w=outer: self.on_delete(t, w))
         title.bind("<Button-1>",
                    lambda e, t=item, w=title, f=font:
-                   self._start_inline_edit(t, w, f))
+                   self._start_inline_edit(t, w, f, e))
 
         # 悬停高亮（编辑期间跳过，避免反复重绘干扰输入）
         def enter(_e, r=row):
@@ -576,6 +577,12 @@ class TodoApp:
         """
         if not self._editing or self._edit_commit is None:
             return
+        # 开启编辑的那一次点击，也会走到这个 all 级绑定（bind_all 在控件
+        # 自身绑定之后执行）。若不当场跳过，刚出现的输入框会被立刻提交掉，
+        # 表现就是「＋ 号点不动 / 标题不能编辑」。
+        serial = getattr(e, "serial", None)
+        if serial is not None and serial == self._edit_start_serial:
+            return
         try:
             target = e.widget
             if target is self._edit_entry:
@@ -595,11 +602,12 @@ class TodoApp:
             except Exception:
                 pass
 
-    def _start_new_row(self):
+    def _start_new_row(self, ev=None):
         """点击右下角 ＋：在列表末尾插入一行输入框，不切视图。"""
         if self._editing:
             return
         self._editing = True
+        self._edit_start_serial = getattr(ev, "serial", None)
         row = tk.Frame(self.inner, bg=BG, height=46)
         row.pack(fill="x", padx=8)
         row.pack_propagate(False)
@@ -623,6 +631,7 @@ class TodoApp:
             state["done"] = True
             self._edit_entry = None
             self._edit_commit = None
+            self._edit_start_serial = None
             text = e.get().strip()
             row.destroy()
             self._editing = False
@@ -643,11 +652,12 @@ class TodoApp:
         e.bind("<Escape>", lambda ev: finish(False))
         e.bind("<FocusOut>", lambda ev: finish(True))
 
-    def _start_inline_edit(self, item, label, font=None):
+    def _start_inline_edit(self, item, label, font=None, ev=None):
         """单击标题：该行原地变输入框，Enter 保存 / Esc 取消 / 失焦保存。"""
         if self._editing:
             return
         self._editing = True
+        self._edit_start_serial = getattr(ev, "serial", None)
         font = font or self._f_title
         w = label.winfo_width()
         if w <= 1:
@@ -676,6 +686,7 @@ class TodoApp:
             state["done"] = True
             self._edit_entry = None
             self._edit_commit = None
+            self._edit_start_serial = None
             cancel_pending()
             text = e.get().strip()
             e.destroy()

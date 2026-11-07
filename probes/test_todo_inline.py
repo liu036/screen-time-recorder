@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""待办窗口单视图交互冒烟：+ 号新建 / 行内编辑 / 优先级循环 / 直接删除。
+"""待办窗口单视图交互冒烟（12 项）：+ 号新建 / 行内编辑 / 优先级循环 /
+直接删除 / 滚动开关 / 点空白保存 / 真实点击按钮与标题不被全局回调吃掉。
 
 运行：python probes/test_todo_inline.py
 用临时库 + 独立端口，不碰真实数据。
@@ -226,6 +227,44 @@ def main():
     assert wait_for(lambda: any(t["title"] == "切筛选前自动保存"
                                 for t in st.list_todos("all")))
     print("编辑中点筛选：先保存再切换 OK")
+
+    # 11) 回归：真实点击 ＋ 号（同一次点击不能被全局"点空白"处理吃掉）
+    ui.filter = "all"
+    ui._last_sig = None
+    ui.refresh()
+    pump()
+    ui.add_btn.event_generate("<Button-1>", x=17, y=17)
+    pump()
+    assert ui._editing is True, "点 ＋ 号后应进入新建态"
+    entries = walk(ui.inner, tk.Entry)
+    assert len(entries) == 1, "点 ＋ 号后应有 1 个输入框: %d" % len(entries)
+    entries[0].insert(0, "真实点击加号")
+    ui.canvas.event_generate("<Button-1>", x=20, y=300)
+    pump()
+    assert ui._editing is False
+    assert wait_for(lambda: any(t["title"] == "真实点击加号"
+                                for t in st.list_todos("all")))
+    print("真实点击 ＋ 号 → 输入框出现 → 点空白保存 OK")
+
+    # 12) 回归：真实点击标题（行内编辑不能被同一次点击立刻提交）
+    ui._last_sig = None
+    ui.refresh()
+    pump()
+    label = find_label(ui.inner, "真实点击加号")
+    assert label is not None, "新建的行未渲染"
+    label.event_generate("<Button-1>", x=10, y=10)
+    pump()
+    assert ui._editing is True, "点标题后应进入编辑态"
+    inline = walk(label, tk.Entry)
+    assert len(inline) == 1, "点标题后应有 1 个行内输入框: %d" % len(inline)
+    inline[0].delete(0, "end")
+    inline[0].insert(0, "真实点击标题改")
+    ui.canvas.event_generate("<Button-1>", x=20, y=300)
+    pump()
+    assert ui._editing is False
+    assert wait_for(lambda: any(t["title"] == "真实点击标题改"
+                                for t in st.list_todos("all")))
+    print("真实点击标题 → 行内编辑 → 点空白保存 OK")
 
     ui.on_close()
     st.close()
