@@ -153,6 +153,11 @@ class TodoApp:
         self._resize_after = None
         self._editing = False       # 行内编辑/新建期间暂停轮询重建
         self._write_seq = 0         # 丢弃过期写请求的回读结果
+        self._edit_entry = None     # 当前行内输入框（判断"点在自己身上"）
+        self._edit_commit = None    # 当前编辑会话的提交函数（点空白时调用）
+        self._scroll_visible = False  # 滚动条当前是否已 pack
+        self._scrollable = False      # 内容是否真的溢出（滚轮是否生效）
+        self._scroll_pending = False  # _sync_scroll 的 after_idle 去重
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -166,6 +171,8 @@ class TodoApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<F5>", lambda e: self.refresh())
         self.root.bind("<Configure>", self._on_resize)
+        # 行内编辑时点任意空白/其他位置 → 自动保存（见 _on_global_click）
+        self.root.bind_all("<Button-1>", self._on_global_click, add="+")
 
     # ---- 布局 ----
     def _build(self):
@@ -180,14 +187,13 @@ class TodoApp:
             b.bind("<Button-1>", lambda e, k=key: self.set_filter(k))
             self.tab_btns[key] = b
 
-        # 列表（Canvas + 内嵌 Frame，支持滚动）
+        # 列表：Canvas 只作容器，滚动条按需出现（内容没溢出时完全不显示）
         wrap = tk.Frame(self.root, bg=BG)
         wrap.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, bd=0)
         self.scroll = tk.Scrollbar(wrap, orient="vertical",
                                    command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.scroll.set)
-        self.scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner = tk.Frame(self.canvas, bg=BG)
         self._win = self.canvas.create_window((0, 0), window=self.inner,
@@ -220,7 +226,63 @@ class TodoApp:
         c.create_line(17, 11, 17, 23, fill="#FFFFFF", width=2)
 
     def _on_inner(self, _e=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        """inner 尺寸变化 → 空闲时再决定是否启用滚动，避免同步重排递归。"""
+        if self._scroll_pending:
+            return
+        self._scroll_pending = True
+        try:
+            self.root.after_idle(self._sync_scroll)
+        except Exception:
+            self._scroll_pending = False
+
+    def _sync_scroll(self):
+        """有多少待办就滚多少：内容没超过可视高度时不显示滚动条、滚轮不生效。"""
+        self._scroll_pending = False
+        try:
+            view_h = self.canvas.winfo_height()
+            if view_h <= 1:
+                return
+            bbox = self.canvas.bbox("all")
+            right = bbox[2] if bbox else self.canvas.winfo_width()
+            bottom = bbox[3] if bbox else 0
+            content_h = bottom - (bbox[1] if bbox else 0)
+        except Exception:
+            return
+
+        need = content_h > view_h + 2       # 2px 容差，避免边界抖动
+        if need != self._scroll_visible:
+            try:
+                if need:
+                    self.scroll.pack(side="right", fill="y",
+                                     before=self.canvas)
+                else:
+                    self.scroll.pack_forget()
+                    self.canvas.yview_moveto(0.0)
+                self._scroll_visible = need
+                # 滚动条出现/消失会改变 canvas 宽度，空闲时重设内嵌 Frame 宽度
+                self.root.after_idle(self._fit_inner_width)
+            except Exception:
+                pass
+        try:
+            if need:
+                self.canvas.configure(scrollregion=bbox)
+            else:
+                # scrollregion 高度至少等于可视高度 → yview 恒为 (0,1)，
+                # 滚轮与拖动都不会产生任何位移，视觉上就是"没有滚动区"
+                self.canvas.configure(scrollregion=(
+                    0, 0, max(right, self.canvas.winfo_width()),
+                    max(bottom, view_h)))
+        except Exception:
+            pass
+        self._scrollable = need
+
+    def _fit_inner_width(self):
+        try:
+            w = self.canvas.winfo_width()
+            if w > 1:
+                self.canvas.itemconfigure(self._win, width=w)
+        except Exception:
+            pass
 
     def _on_canvas(self, e):
         self.canvas.itemconfigure(self._win, width=e.width)
@@ -241,6 +303,9 @@ class TodoApp:
         self._resize_after = self.root.after(180, self.refresh)
 
     def _on_wheel(self, e):
+        # 内容没溢出时滚轮完全不响应（不再"只有一个待办也能滚"）
+        if not self._scrollable:
+            return
         try:
             self.canvas.yview_scroll(int(-e.delta / 120), "units")
         except Exception:
@@ -270,7 +335,7 @@ class TodoApp:
                 err = ex
             try:
                 self.root.after(0, lambda: self._after_write(
-                    result, data, summary, err, on_success, seq))
+                    result, data, summary, err, on_success, seq, flt))
             except Exception:
                 pass
 
@@ -278,11 +343,14 @@ class TodoApp:
                          name="todo-write").start()
 
     def _after_write(self, result, data, summary, err,
-                     on_success=None, seq=None):
+                     on_success=None, seq=None, flt=None):
         if err is not None:
             messagebox.showerror("操作失败", str(err), parent=self.root)
             self._last_sig = None
             self.refresh()          # 失败才回滚显示
+            return
+        # 写期间切换了筛选：这批回读属于旧视图，直接丢弃（set_filter 已重拉）
+        if flt is not None and flt != self.filter:
             return
         if on_success is not None:
             try:
@@ -342,8 +410,8 @@ class TodoApp:
         self._update_tabs(summary)
         self._update_status(summary)
         # 不在这里强制 update_idletasks()：它会同步重排全部子控件，
-        # 20 行约 100ms，是点击后界面卡顿的主因。滚动区域交给空闲回调。
-        self.root.after_idle(self._on_inner)
+        # 20 行约 100ms，是点击后界面卡顿的主因。滚动状态交给空闲回调。
+        self.root.after_idle(self._sync_scroll)
         if pos:
             self.canvas.yview_moveto(pos)
 
@@ -485,8 +553,47 @@ class TodoApp:
     def set_filter(self, key):
         if key == self.filter:
             return
+        # 编辑中点筛选：先同步提交输入，再切换。否则 refresh 会因 _editing
+        # 被跳过，而后台回读又会锁住签名，导致界面停留在旧筛选的内容。
+        if self._editing and self._edit_commit is not None:
+            fn, self._edit_commit = self._edit_commit, None
+            try:
+                fn()
+            except Exception:
+                pass
         self.filter = key
+        self._last_sig = None
         self.refresh()
+
+    # ---- 点击任意空白自动保存 ----
+    def _on_global_click(self, e):
+        """编辑中点击输入框以外任何位置 → 保存。
+
+        Tk 的 Frame / Canvas / Label 默认 takefocus=0，点它们不会抢焦点，
+        Entry 的 <FocusOut> 也就不会触发（输入框会一直挂着）。所以不能只靠
+        失焦事件，必须在这里显式提交。bind_all 在控件自身绑定之后执行，
+        再用 after_idle 延后，保证同一次点击的按钮动作先跑完。
+        """
+        if not self._editing or self._edit_commit is None:
+            return
+        try:
+            target = e.widget
+            if target is self._edit_entry:
+                return
+            if self._edit_entry is not None and \
+                    str(target).startswith(str(self._edit_entry) + "."):
+                return
+        except Exception:
+            pass
+        self.root.after_idle(self._commit_outside)
+
+    def _commit_outside(self):
+        fn, self._edit_commit = self._edit_commit, None
+        if fn is not None and self._editing:
+            try:
+                fn()
+            except Exception:
+                pass
 
     def _start_new_row(self):
         """点击右下角 ＋：在列表末尾插入一行输入框，不切视图。"""
@@ -502,17 +609,20 @@ class TodoApp:
         e.pack(fill="x", padx=(4, 30), ipady=5, pady=6)
 
         def reveal():
-            self._on_inner()
+            self._sync_scroll()
             self.canvas.yview_moveto(1.0)
 
         self.root.after_idle(reveal)
         e.focus_set()
+        self._edit_entry = e
         state = {"done": False}
 
         def finish(save):
             if state["done"]:
                 return
             state["done"] = True
+            self._edit_entry = None
+            self._edit_commit = None
             text = e.get().strip()
             row.destroy()
             self._editing = False
@@ -523,11 +633,12 @@ class TodoApp:
                 todo = (result or {}).get("todo")
                 if todo:
                     self._render_row(todo)    # 只追加一行，不重建列表
-                    self.root.after_idle(self._on_inner)
+                    self.root.after_idle(self._sync_scroll)
 
             self._write("/api/todos", "POST", {"title": text},
                         on_success=on_ok)
 
+        self._edit_commit = lambda: finish(True)
         e.bind("<Return>", lambda ev: finish(True))
         e.bind("<Escape>", lambda ev: finish(False))
         e.bind("<FocusOut>", lambda ev: finish(True))
@@ -548,6 +659,7 @@ class TodoApp:
         e.select_range(0, "end")
         e.place(x=0, y=-3, width=max(120, w), height=30)
         e.focus_set()
+        self._edit_entry = e
         state = {"done": False, "pending": None}
 
         def cancel_pending():
@@ -562,6 +674,8 @@ class TodoApp:
             if state["done"]:
                 return
             state["done"] = True
+            self._edit_entry = None
+            self._edit_commit = None
             cancel_pending()
             text = e.get().strip()
             e.destroy()
@@ -586,6 +700,7 @@ class TodoApp:
             cancel_pending()
             state["pending"] = self.root.after(80, lambda: commit(True))
 
+        self._edit_commit = lambda: commit(True)
         e.bind("<Return>", lambda ev: commit(True))
         e.bind("<Escape>", lambda ev: commit(False))
         e.bind("<FocusOut>", on_focus_out)

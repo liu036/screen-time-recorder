@@ -140,6 +140,93 @@ def main():
                 if isinstance(w, tk.Toplevel)], "删除不应产生对话框"
     print("点 × 直接删除（无确认弹窗）OK")
 
+    def pump(n=3):
+        for _ in range(n):
+            ui.root.update()
+            ui.root.update_idletasks()
+
+    class Wheel:
+        delta = -120
+
+    # 6) 内容不足：不预设滚动区，滚动条不显示、滚轮无效
+    ui.refresh()
+    pump()
+    assert not ui.scroll.winfo_ismapped(), "内容不足时滚动条仍在"
+    assert ui._scrollable is False
+    sr = str(ui.canvas.cget("scrollregion")).split()
+    assert int(sr[3]) >= ui.canvas.winfo_height(), sr
+    view_before = ui.canvas.yview()
+    ui._on_wheel(Wheel())
+    pump()
+    assert ui.canvas.yview() == view_before, "内容不足时不应能滚动"
+    print("内容不足：无滚动条 / 滚轮无效 OK")
+
+    # 7) 内容溢出：滚动条才出现，滚轮生效
+    for i in range(24):
+        st.add_todo("压测待办 %02d" % i)
+    ui.refresh()
+    pump()
+    assert ui.scroll.winfo_ismapped(), "内容溢出时滚动条未出现"
+    assert ui._scrollable is True
+    ui.canvas.yview_moveto(0.0)
+    ui._on_wheel(Wheel())
+    pump()
+    assert ui.canvas.yview()[0] > 0, "溢出时滚轮应能下滚"
+    print("内容溢出：滚动条出现 / 滚轮生效 OK")
+
+    # 8) 点击任意空白自动保存；点输入框自身不提交
+    ui.canvas.yview_moveto(0.0)
+    pump()
+    label = find_label(ui.inner, "交周报（已改）")
+    assert label is not None
+    item = [t for t in st.list_todos("all")
+            if t["title"] == "交周报（已改）"][0]
+    ui._start_inline_edit(item, label)
+    pump()
+    e = walk(label, tk.Entry)[0]
+    e.delete(0, "end")
+    e.insert(0, "点空白自动保存")
+    e.event_generate("<Button-1>", x=5, y=5)
+    pump()
+    assert ui._editing is True, "点输入框自身不应提交"
+    ui.canvas.event_generate("<Button-1>", x=20, y=300)
+    pump()
+    assert ui._editing is False, "点空白未结束编辑"
+    assert wait_for(lambda: any(t["title"] == "点空白自动保存"
+                                for t in st.list_todos("all")))
+    print("点击任意空白自动保存（行内编辑）OK")
+
+    # 9) 新建行点空白同样自动保存
+    ui._start_new_row()
+    pump()
+    entries = walk(ui.inner, tk.Entry)
+    assert len(entries) == 1, entries
+    entries[0].insert(0, "新建行点空白保存")
+    ui.canvas.event_generate("<Button-1>", x=20, y=300)
+    pump()
+    assert ui._editing is False
+    assert wait_for(lambda: any(t["title"] == "新建行点空白保存"
+                                for t in st.list_todos("all")))
+    print("点击任意空白自动保存（新建行）OK")
+
+    # 10) 编辑中点筛选：先提交输入再切换，界面与数据一致
+    label = find_label(ui.inner, "点空白自动保存")
+    assert label is not None
+    item = [t for t in st.list_todos("all")
+            if t["title"] == "点空白自动保存"][0]
+    ui._start_inline_edit(item, label)
+    pump()
+    e = walk(label, tk.Entry)[0]
+    e.delete(0, "end")
+    e.insert(0, "切筛选前自动保存")
+    ui.tab_btns["open"].event_generate("<Button-1>")
+    pump()
+    assert ui.filter == "open", ui.filter
+    assert ui._editing is False
+    assert wait_for(lambda: any(t["title"] == "切筛选前自动保存"
+                                for t in st.list_todos("all")))
+    print("编辑中点筛选：先保存再切换 OK")
+
     ui.on_close()
     st.close()
     print("all todo inline tests passed")
