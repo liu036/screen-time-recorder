@@ -25,6 +25,8 @@ from .daemon import Daemon
 from . import cli
 from . import config
 from .reminder import ReminderService
+from .pomodoro import PomodoroService, fmt_mmss
+from .collector import get_idle_ms
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NIN_BALLOONUSERCLICK = 0x0405  # 点击气泡正文
@@ -131,6 +133,8 @@ class TrayApp:
         self._tip = "屏幕时间记录器 · 待办"
         self._web_url = None
         self.reminder = None
+        self.pomodoro = None
+        self._menu_todos = []
 
     # ---- 托盘图标 ----
     def _add_icon(self):
@@ -203,6 +207,8 @@ class TrayApp:
         win32gui.AppendMenu(menu, win32con.MF_STRING, 3, "待办清单")
         win32gui.AppendMenu(menu, win32con.MF_STRING, 4, "快速添加待办…")
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+        self._append_pomodoro_menu(menu)
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
         win32gui.AppendMenu(
             menu, win32con.MF_STRING, 5,
             "暂停采集" if not self.paused else "继续采集")
@@ -231,6 +237,78 @@ class TrayApp:
             self.on_autostart()
         elif cmd == 7:
             self.on_quit()
+        elif cmd == 100:
+            self._start_pomodoro()
+        elif cmd == 101:
+            self.on_pomodoro_setup()
+        elif cmd == 102:
+            self.on_pomodoro_toggle_pause()
+        elif cmd == 103:
+            self.on_pomodoro_stop()
+        elif cmd == 104:
+            if self.pomodoro:
+                self.pomodoro.start_break()
+        elif cmd == 105:
+            if self.pomodoro:
+                self.pomodoro.skip_break()
+        elif 200 <= cmd < 300:
+            idx = cmd - 200
+            tid = (self._menu_todos[idx]
+                   if 0 <= idx < len(self._menu_todos) else None)
+            self._start_pomodoro(todo_id=tid)
+
+    def _append_pomodoro_menu(self, menu):
+        """两层子菜单：空闲给开始入口，运行中只给暂停/结束。"""
+        sub = win32gui.CreatePopupMenu()
+        st = {"state": "idle", "config": {}}
+        if self.pomodoro:
+            try:
+                st = self.pomodoro.status()
+            except Exception:
+                pass
+        state = st.get("state", "idle")
+        cfg = st.get("config") or {}
+        fm = cfg.get("focus_minutes", config.POMODORO_DEFAULT_FOCUS_MIN)
+
+        if state == "idle":
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 100,
+                                "自由专注（%d 分钟）" % fm)
+            self._menu_todos = []
+            try:
+                todos = self.daemon.storage.list_todos("open", limit=8)
+            except Exception:
+                todos = []
+            if todos:
+                win32gui.AppendMenu(sub, win32con.MF_SEPARATOR, 0, "")
+                for i, t in enumerate(todos):
+                    self._menu_todos.append(t["id"])
+                    title = (t["title"] or "").strip()
+                    if len(title) > 18:
+                        title = title[:17] + "…"
+                    win32gui.AppendMenu(sub, win32con.MF_STRING, 200 + i,
+                                        title or "(无标题)")
+            win32gui.AppendMenu(sub, win32con.MF_SEPARATOR, 0, "")
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 101,
+                                "自定义时长与休息…")
+        elif state == "focus_done":
+            win32gui.AppendMenu(
+                sub, win32con.MF_STRING, 104,
+                "开始休息（%d 分钟）" % st.get("break_minutes", 0))
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 105, "跳过休息")
+        elif state == "paused":
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 102, "继续")
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 103, "结束本次")
+        elif state == "break":
+            win32gui.AppendMenu(
+                sub, win32con.MF_STRING, 105,
+                "结束休息（剩余 %s）" % fmt_mmss(st.get("remaining_ms", 0)))
+        else:  # focus
+            win32gui.AppendMenu(
+                sub, win32con.MF_STRING, 102,
+                "暂停（剩余 %s）" % fmt_mmss(st.get("remaining_ms", 0)))
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 103, "结束本次")
+
+        win32gui.AppendMenu(menu, win32con.MF_POPUP, sub, "番茄钟")
 
     # ---- 菜单动作 ----
     def _today_text(self):
@@ -276,6 +354,60 @@ class TrayApp:
             _show_message_box("屏幕时间记录器",
                               f"打开待办窗口失败：{e}", error=True)
 
+    # ---- 番茄钟 ----
+    def _start_pomodoro(self, todo_id=None):
+        if not self.pomodoro:
+            return
+        try:
+            cfg = self.daemon.storage.pomodoro_config()
+            self.pomodoro.start(focus_minutes=cfg["focus_minutes"],
+                                break_minutes=cfg["break_minutes"],
+                                todo_id=todo_id)
+        except Exception as e:
+            _show_message_box("番茄钟", "启动失败：%s" % e, error=True)
+
+    def on_pomodoro_setup(self):
+        """让待办窗口展开时长设置面板（用 settings 做一次性信号）。"""
+        try:
+            self.daemon.storage.set_setting("pomodoro.open_setup", "1")
+        except Exception:
+            pass
+        self.open_todo_window(focus=False)
+
+    def on_pomodoro_toggle_pause(self):
+        if not self.pomodoro:
+            return
+        st = self.pomodoro.status()
+        if st.get("state") == "paused":
+            self.pomodoro.resume()
+        elif st.get("state") == "focus":
+            self.pomodoro.pause("manual")
+
+    def on_pomodoro_stop(self):
+        if self.pomodoro:
+            self.pomodoro.stop("manual")
+
+    def _on_pomodoro_state(self, st):
+        """番茄钟状态回调：刷新托盘提示（每 5s 一次，避免频繁 NIM_MODIFY）。"""
+        try:
+            state = st.get("state")
+            if state in ("focus", "paused") and st.get("planned_ms"):
+                label = st.get("title") or "自由专注"
+                if state == "paused":
+                    self._set_tip("番茄钟 已暂停 · %s" % label)
+                else:
+                    self._set_tip("番茄钟 %s · %s" % (
+                        fmt_mmss(st.get("remaining_ms", 0)), label))
+            elif state == "break":
+                self._set_tip("番茄钟 休息 %s" % fmt_mmss(
+                    st.get("remaining_ms", 0)))
+            elif state == "focus_done":
+                self._set_tip("番茄钟 完成 · 等待选择")
+            else:
+                self._update_tip(self.daemon.storage.todo_summary())
+        except Exception:
+            pass
+
     def notify(self, title, body, todo_ids=None):
         """ReminderService 的通知回调：托盘气泡。"""
         ok = _balloon(self.hwnd, self.hicon, self._tip, title, body)
@@ -296,13 +428,8 @@ class TrayApp:
             pass
         return True, ""
 
-    def _update_tip(self, summary):
-        n = summary.get("open", 0)
-        od = summary.get("overdue", 0)
-        tip = "屏幕时间记录器 · 未完成 %d" % n
-        if od:
-            tip += "（逾期 %d）" % od
-        self._tip = tip[:127]
+    def _set_tip(self, text):
+        self._tip = (text or "")[:127]
         try:
             win32gui.Shell_NotifyIcon(
                 win32gui.NIM_MODIFY,
@@ -310,6 +437,20 @@ class TrayApp:
                  self.hicon, self._tip))
         except Exception:
             pass
+
+    def _update_tip(self, summary):
+        # 番茄钟运行时 tooltip 归它，避免被 20s 一次的待办数刷新覆盖
+        try:
+            if self.pomodoro and self.pomodoro.status().get("state") != "idle":
+                return
+        except Exception:
+            pass
+        n = summary.get("open", 0)
+        od = summary.get("overdue", 0)
+        tip = "屏幕时间记录器 · 未完成 %d" % n
+        if od:
+            tip += "（逾期 %d）" % od
+        self._set_tip(tip)
 
     def on_pause(self):
         if self.paused:
@@ -327,6 +468,11 @@ class TrayApp:
 
     def on_quit(self):
         self._remove_icon()
+        try:
+            if self.pomodoro:
+                self.pomodoro.shutdown()
+        except Exception:
+            pass
         try:
             if self.reminder:
                 self.reminder.stop()
@@ -346,10 +492,20 @@ class TrayApp:
     def run(self):
         _setup_logging()
         self.daemon.start()
+        # 番茄钟服务：先构造（web/托盘要引用），图标就绪后再启动线程
+        try:
+            self.pomodoro = PomodoroService(
+                self.daemon.storage, self.notify,
+                state_cb=self._on_pomodoro_state,
+                lock_getter=lambda: self.daemon.collector.lock_state,
+                idle_getter=get_idle_ms)
+        except Exception as e:
+            print(f"[tray] 番茄钟服务初始化失败: {e}")
         # 本地仪表盘（127.0.0.1:8765），随采集器常驻
         try:
             from . import web
-            self._web_url = web.start_server(self.daemon.storage)
+            self._web_url = web.start_server(self.daemon.storage,
+                                             pomodoro=self.pomodoro)
             print(f"[tray] 仪表盘: {self._web_url}")
         except Exception as e:
             print(f"[tray] 仪表盘启动失败: {e}")
@@ -359,6 +515,12 @@ class TrayApp:
                 win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
             self._create_window()
             self._add_icon()
+            # 番茄钟线程（通知依赖已建好的 hwnd / hicon）
+            try:
+                if self.pomodoro:
+                    self.pomodoro.start()
+            except Exception as e:
+                print(f"[tray] 番茄钟线程启动失败: {e}")
             # 待办提醒（依赖已建好的 hwnd / hicon）
             try:
                 self.reminder = ReminderService(

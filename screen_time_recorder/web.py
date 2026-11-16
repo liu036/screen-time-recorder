@@ -4,6 +4,7 @@
 随采集器常驻启动；托盘菜单「打开仪表盘」直接打开。
 调试可单独运行：python main.py dashboard
 """
+import json
 import os
 import threading
 import webbrowser
@@ -18,7 +19,7 @@ ASSETS_DIR = os.path.join(BASE, "assets")
 DEFAULT_PORT = 8765
 
 
-def create_app(storage):
+def create_app(storage, pomodoro=None):
     app = Flask(__name__)
 
     @app.get("/")
@@ -162,6 +163,102 @@ def create_app(storage):
     def api_todo_delete(todo_id):
         return jsonify({"ok": True, "deleted": storage.delete_todo(todo_id)})
 
+    # ---- 番茄钟（主进程持有唯一会话，窗口/托盘只发指令）----
+    def _no_service():
+        return jsonify({"error": "pomodoro service not running"}), 503
+
+    def _int_or_none(value):
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    @app.get("/api/pomodoro")
+    def api_pomodoro():
+        if pomodoro is None:
+            return _no_service()
+        return jsonify(pomodoro.status())
+
+    @app.post("/api/pomodoro/start")
+    def api_pomodoro_start():
+        if pomodoro is None:
+            return _no_service()
+        body = request.get_json(silent=True) or {}
+        try:
+            fm = _int_or_none(body.get("focus_minutes"))
+            bm = _int_or_none(body.get("break_minutes"))
+            tid = _int_or_none(body.get("todo_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "时长与待办 id 必须是整数"}), 400
+        return jsonify({"ok": True, "state": pomodoro.start(
+            focus_minutes=fm, break_minutes=bm, todo_id=tid,
+            title=body.get("title"))})
+
+    @app.post("/api/pomodoro/pause")
+    def api_pomodoro_pause():
+        if pomodoro is None:
+            return _no_service()
+        body = request.get_json(silent=True) or {}
+        return jsonify({"ok": True, "state": pomodoro.pause(
+            body.get("reason") or "manual")})
+
+    @app.post("/api/pomodoro/resume")
+    def api_pomodoro_resume():
+        if pomodoro is None:
+            return _no_service()
+        return jsonify({"ok": True, "state": pomodoro.resume()})
+
+    @app.post("/api/pomodoro/stop")
+    def api_pomodoro_stop():
+        if pomodoro is None:
+            return _no_service()
+        body = request.get_json(silent=True) or {}
+        return jsonify({"ok": True, "state": pomodoro.stop(
+            body.get("reason") or "manual")})
+
+    @app.post("/api/pomodoro/start-break")
+    def api_pomodoro_start_break():
+        if pomodoro is None:
+            return _no_service()
+        return jsonify({"ok": True, "state": pomodoro.start_break()})
+
+    @app.post("/api/pomodoro/skip-break")
+    def api_pomodoro_skip_break():
+        if pomodoro is None:
+            return _no_service()
+        return jsonify({"ok": True, "state": pomodoro.skip_break()})
+
+    @app.post("/api/pomodoro/ack-setup")
+    def api_pomodoro_ack_setup():
+        if pomodoro is not None:
+            pomodoro.ack_setup()
+        return jsonify({"ok": True})
+
+    @app.get("/api/pomodoro/report/<int:session_id>")
+    def api_pomodoro_report(session_id):
+        row = storage.get_pomodoro_session(session_id)
+        if not row:
+            return jsonify({"error": "会话不存在"}), 404
+        try:
+            report = json.loads(row.get("report_json") or "{}")
+        except (TypeError, ValueError):
+            report = {}
+        session = {k: v for k, v in row.items() if k != "report_json"}
+        return jsonify({"session": session, "report": report})
+
+    @app.get("/api/settings/pomodoro")
+    def api_pomodoro_settings():
+        return jsonify(storage.pomodoro_config())
+
+    @app.put("/api/settings/pomodoro")
+    def api_pomodoro_settings_put():
+        body = request.get_json(silent=True) or {}
+        try:
+            cfg = storage.set_pomodoro_config(
+                body.get("focus_minutes"), body.get("break_minutes"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "时长必须是整数"}), 400
+        return jsonify(cfg)
+
     return app
 
 
@@ -172,12 +269,12 @@ def _as_ms(value):
     return int(value)
 
 
-def start_server(storage, port=DEFAULT_PORT, open_browser=False):
+def start_server(storage, port=DEFAULT_PORT, open_browser=False, pomodoro=None):
     """后台线程启动服务，返回访问 URL。"""
     import logging
     # 关掉 werkzeug 的每条请求日志：否则会灌满 tray.log
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    app = create_app(storage)
+    app = create_app(storage, pomodoro=pomodoro)
     url = f"http://127.0.0.1:{port}/"
 
     def run():

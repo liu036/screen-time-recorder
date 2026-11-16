@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ from tkinter import messagebox
 from tkinter import font as tkfont
 
 from . import config
+from .pomodoro import fmt_mmss
 
 API_BASE = os.environ.get("STR_API", "http://127.0.0.1:8765")
 WINDOW_TITLE = "待办"
@@ -160,6 +162,17 @@ class TodoApp:
         self._scrollable = False      # 内容是否真的溢出（滚轮是否生效）
         self._scroll_pending = False  # _sync_scroll 的 after_idle 去重
         self._topmost = False       # 窗口置顶状态（写入 todo_window.json，重开恢复）
+        # 番茄钟：状态由主进程持有，这里只做展示与控制
+        self._pomo = None
+        self._pomo_sig = None
+        self._pomo_after = None
+        self._pomo_tick_after = None
+        self._pomo_sync_mono = 0.0
+        self._pomo_setup_open = False
+        self._pomo_setup_acked = False
+        self._pomo_lbl = None
+        self._focus_var = None
+        self._break_var = None
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -171,6 +184,8 @@ class TodoApp:
         # 窗口映射后再确认一次，避免部分环境在未映射时设置不生效
         self.root.after_idle(self._apply_topmost)
         self.refresh()
+        self.root.after(400, self._poll_pomo)
+        self.root.after(1000, self._tick_pomo)
         if focus_input:
             self.root.after(120, self._start_new_row)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -207,9 +222,13 @@ class TodoApp:
         self.canvas.bind("<Configure>", self._on_canvas)
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
 
-        # 底部：状态 + 纯 + 号新建按钮
+        # 番茄钟区域：默认隐藏，状态变化时就地展开（不新增窗口/视图）
+        self.pomo_area = tk.Frame(self.root, bg=BG)
+
+        # 底部：状态 + 番茄钟 + 置顶 + 纯 + 号新建按钮
         bottom = tk.Frame(self.root, bg=BG)
         bottom.pack(fill="x", padx=12, pady=(4, 10))
+        self.bottom = bottom
         self.status = tk.Label(bottom, text="", font=F_SMALL, fg=MUTED,
                                bg=BG, anchor="w")
         self.status.pack(side="left")
@@ -227,6 +246,13 @@ class TodoApp:
                                 cursor="hand2")
         self.pin_btn.pack(side="right", padx=(0, 8))
         self.pin_btn.bind("<Button-1>", self.toggle_topmost)
+
+        # 番茄钟入口：空闲时展开时长面板；运行时只作状态提示
+        self.pomo_btn = tk.Label(bottom, text="番茄钟", font=F_SMALL,
+                                 fg=MUTED, bg=BG, padx=8, pady=4,
+                                 cursor="hand2")
+        self.pomo_btn.pack(side="right", padx=(0, 4))
+        self.pomo_btn.bind("<Button-1>", lambda e: self._toggle_pomo_setup())
 
     def _apply_topmost(self):
         """把置顶状态同步到窗口属性与按钮外观。"""
@@ -247,6 +273,295 @@ class TodoApp:
         self._topmost = not self._topmost
         self._apply_topmost()
         self._save_geometry()
+
+    # ---- 番茄钟 ----
+    def _schedule_pomo(self):
+        try:
+            self._pomo_after = self.root.after(3000, self._poll_pomo)
+        except Exception:
+            self._pomo_after = None
+
+    def _poll_pomo(self):
+        if self._pomo_after:
+            try:
+                self.root.after_cancel(self._pomo_after)
+            except Exception:
+                pass
+            self._pomo_after = None
+        try:
+            st = api("/api/pomodoro", timeout=2.0)
+            self._pomo = st
+            self._pomo_sync_mono = time.monotonic()
+            if st.get("open_setup") and st.get("state") == "idle":
+                self._pomo_setup_open = True
+                self._pomo_sig = None
+                if not self._pomo_setup_acked:
+                    self._pomo_setup_acked = True
+                    try:
+                        api("/api/pomodoro/ack-setup", "POST", {})
+                    except Exception:
+                        pass
+            else:
+                self._pomo_setup_acked = False
+                if st.get("state") != "idle":
+                    self._pomo_setup_open = False
+            self._render_pomo()
+        except Exception:
+            pass          # 主进程没起/瞬时失败：保持上次显示
+        self._schedule_pomo()
+
+    def _tick_pomo(self):
+        self._pomo_tick_after = None
+        st = self._pomo
+        if (st and self._pomo_lbl is not None
+                and st.get("state") in ("focus", "break")):
+            remain = int(st.get("remaining_ms", 0) -
+                         (time.monotonic() - self._pomo_sync_mono) * 1000)
+            try:
+                self._pomo_lbl.configure(text=fmt_mmss(max(0, remain)))
+            except Exception:
+                pass
+        try:
+            self._pomo_tick_after = self.root.after(1000, self._tick_pomo)
+        except Exception:
+            pass
+
+    def _render_pomo(self):
+        st = self._pomo or {}
+        state = st.get("state", "idle")
+        setup = self._pomo_setup_open and state == "idle"
+        sig = (state, setup, st.get("session_id"), st.get("title"),
+               st.get("break_minutes"), st.get("focus_minutes"))
+        if sig == self._pomo_sig:
+            return
+        self._pomo_sig = sig
+
+        for w in self.pomo_area.winfo_children():
+            w.destroy()
+        self._pomo_lbl = None
+        if state == "idle" and not setup:
+            try:
+                self.pomo_area.pack_forget()
+            except Exception:
+                pass
+            self._update_pomo_btn(state, setup)
+            return
+        try:
+            self.pomo_area.pack(fill="x", padx=12, pady=(0, 4),
+                                before=self.bottom)
+        except Exception:
+            try:
+                self.pomo_area.pack(fill="x", padx=12, pady=(0, 4))
+            except Exception:
+                pass
+
+        if setup:
+            self._render_pomo_setup(st)
+        elif state == "focus_done":
+            self._render_pomo_done(st)
+        else:
+            self._render_pomo_running(st)
+        self._update_pomo_btn(state, setup)
+
+    def _update_pomo_btn(self, state, setup):
+        try:
+            if state == "idle":
+                self.pomo_btn.configure(
+                    text="收起" if setup else "番茄钟",
+                    fg=ACCENT if setup else MUTED, bg=BG)
+            elif state == "paused":
+                self.pomo_btn.configure(text="已暂停", fg=DANGER, bg=BG)
+            elif state == "focus_done":
+                self.pomo_btn.configure(text="待选择", fg=ACCENT, bg=BG)
+            else:
+                self.pomo_btn.configure(text="进行中", fg=ACCENT, bg=BG)
+        except Exception:
+            pass
+
+    def _render_pomo_setup(self, st):
+        pad = tk.Frame(self.pomo_area, bg=CARD, highlightthickness=1,
+                       highlightbackground=FAINT)
+        pad.pack(fill="x")
+        pad.columnconfigure(1, weight=1)
+        cfg = st.get("config") or {}
+        self._focus_var = tk.StringVar(
+            value=str(cfg.get("focus_minutes",
+                              config.POMODORO_DEFAULT_FOCUS_MIN)))
+        self._break_var = tk.StringVar(
+            value=str(cfg.get("break_minutes",
+                              config.POMODORO_DEFAULT_BREAK_MIN)))
+
+        tk.Label(pad, text="专注", font=F_SMALL, fg=MUTED, bg=CARD).grid(
+            row=0, column=0, sticky="w", padx=(10, 4), pady=(8, 3))
+        self._stepper(pad, self._focus_var, config.POMODORO_FOCUS_MIN,
+                      config.POMODORO_FOCUS_MAX,
+                      config.POMODORO_DEFAULT_FOCUS_MIN).grid(
+            row=0, column=1, sticky="e", padx=(0, 10), pady=(8, 3))
+
+        tk.Label(pad, text="休息", font=F_SMALL, fg=MUTED, bg=CARD).grid(
+            row=1, column=0, sticky="w", padx=(10, 4), pady=(2, 3))
+        self._stepper(pad, self._break_var, config.POMODORO_BREAK_MIN,
+                      config.POMODORO_BREAK_MAX,
+                      config.POMODORO_DEFAULT_BREAK_MIN).grid(
+            row=1, column=1, sticky="e", padx=(0, 10), pady=(2, 3))
+
+        tk.Label(pad, text="步长 5 分钟 · 休息 0 = 只专注不休息",
+                 font=("Microsoft YaHei UI", 8), fg=FAINT, bg=CARD,
+                 anchor="w").grid(row=2, column=0, columnspan=2,
+                                  sticky="w", padx=10)
+
+        bar = tk.Frame(pad, bg=CARD)
+        bar.grid(row=3, column=0, columnspan=2, sticky="ew",
+                 padx=10, pady=(7, 9))
+        start = tk.Label(bar, text="开始专注", font=F_SMALL, fg="#FFFFFF",
+                         bg=ACCENT, padx=14, pady=4, cursor="hand2")
+        start.pack(side="left")
+        start.bind("<Button-1>", lambda e: self._start_pomo_from_panel())
+        cancel = tk.Label(bar, text="取消", font=F_SMALL, fg=MUTED,
+                          bg=CARD, padx=8, pady=4, cursor="hand2")
+        cancel.pack(side="right")
+        cancel.bind("<Button-1>", lambda e: self._close_pomo_setup())
+
+    def _stepper(self, parent, var, lo, hi, default):
+        box = tk.Frame(parent, bg=CARD)
+
+        def bump(delta):
+            try:
+                v = int(str(var.get()).strip())
+            except (TypeError, ValueError):
+                v = default
+            var.set(str(max(lo, min(hi, v + delta))))
+
+        minus = tk.Label(box, text="−", font=F_BODY, fg=MUTED, bg=BG,
+                         padx=6, pady=2, cursor="hand2")
+        minus.pack(side="left")
+        minus.bind("<Button-1>", lambda e: bump(-config.POMODORO_STEP_MIN))
+        e = tk.Entry(box, textvariable=var, width=4, font=F_BODY, bg=CARD,
+                     fg=INK, relief="flat", justify="center",
+                     insertbackground=INK, highlightthickness=1,
+                     highlightbackground=FAINT, highlightcolor=ACCENT)
+        e.pack(side="left", ipady=3, padx=6)
+        e.bind("<FocusOut>", lambda ev: self._pomo_read(var, lo, hi, default))
+        plus = tk.Label(box, text="+", font=F_BODY, fg=MUTED, bg=BG,
+                        padx=6, pady=2, cursor="hand2")
+        plus.pack(side="left")
+        plus.bind("<Button-1>", lambda e: bump(config.POMODORO_STEP_MIN))
+        tk.Label(box, text="分钟", font=F_SMALL, fg=MUTED, bg=CARD,
+                 padx=2).pack(side="left")
+        return box
+
+    @staticmethod
+    def _pomo_read(var, lo, hi, default):
+        """非法输入静默回退到合法值（不弹错误框）。"""
+        try:
+            v = int(str(var.get()).strip())
+        except (TypeError, ValueError):
+            v = default
+        v = max(lo, min(hi, v))
+        var.set(str(v))
+        return v
+
+    def _render_pomo_running(self, st):
+        state = st.get("state")
+        row = tk.Frame(self.pomo_area, bg=CARD, highlightthickness=1,
+                       highlightbackground=FAINT)
+        row.pack(fill="x")
+        self._pomo_lbl = tk.Label(
+            row, text=fmt_mmss(st.get("remaining_ms", 0)),
+            font=("Microsoft YaHei UI", 15, "bold"),
+            fg=DANGER if state == "paused" else INK, bg=CARD, padx=10)
+        self._pomo_lbl.pack(side="left", pady=6)
+
+        def mkbtn(text, fn, fg=MUTED):
+            b = tk.Label(row, text=text, font=F_SMALL, fg=fg, bg=CARD,
+                         padx=6, pady=4, cursor="hand2")
+            b.pack(side="right", padx=(0, 6))
+            b.bind("<Button-1>", lambda e: fn())
+            return b
+
+        if state == "break":
+            mkbtn("结束休息", lambda: self._pomo_action(
+                "/api/pomodoro/skip-break"), DANGER)
+            label = "休息中"
+        else:
+            mkbtn("结束", lambda: self._pomo_action(
+                "/api/pomodoro/stop", {"reason": "manual"}), DANGER)
+            if state == "paused":
+                mkbtn("继续", lambda: self._pomo_action(
+                    "/api/pomodoro/resume"), ACCENT)
+                label = "已暂停"
+            else:
+                mkbtn("暂停", lambda: self._pomo_action(
+                    "/api/pomodoro/pause"), MUTED)
+                label = ""
+        title = st.get("title") or "自由专注"
+        text = label or _ellipsize(title, self._f_small, 118)
+        tk.Label(row, text=text, font=F_SMALL, fg=MUTED, bg=CARD,
+                 anchor="w").pack(side="left", fill="x", expand=True)
+
+    def _render_pomo_done(self, st):
+        row = tk.Frame(self.pomo_area, bg=CARD, highlightthickness=1,
+                       highlightbackground=FAINT)
+        row.pack(fill="x")
+        tk.Label(row, text="完成 %d 分钟" % (st.get("focus_minutes") or 0),
+                 font=F_SMALL, fg=INK, bg=CARD, padx=10, pady=9).pack(
+            side="left")
+
+        def mkbtn(text, fn, fg=MUTED, bg=CARD):
+            b = tk.Label(row, text=text, font=F_SMALL, fg=fg, bg=bg,
+                         padx=6, pady=3, cursor="hand2")
+            b.pack(side="right", padx=(0, 4))
+            b.bind("<Button-1>", lambda e: fn())
+            return b
+
+        mkbtn("休息 %d 分" % (st.get("break_minutes") or 0),
+              lambda: self._pomo_action("/api/pomodoro/start-break"),
+              "#FFFFFF", ACCENT)
+        mkbtn("跳过", lambda: self._pomo_action("/api/pomodoro/skip-break"))
+        cfg = st.get("config") or {}
+        mkbtn("再来一个", lambda: self._pomo_action(
+            "/api/pomodoro/start",
+            {"focus_minutes": cfg.get("focus_minutes"),
+             "break_minutes": cfg.get("break_minutes")}))
+        self._pomo_lbl = None
+
+    def _toggle_pomo_setup(self):
+        st = self._pomo or {}
+        if st.get("state", "idle") != "idle":
+            return
+        self._pomo_setup_open = not self._pomo_setup_open
+        self._pomo_sig = None
+        self._render_pomo()
+
+    def _open_pomo_setup(self):
+        self._pomo_setup_open = True
+        self._pomo_sig = None
+        self._render_pomo()
+
+    def _close_pomo_setup(self):
+        self._pomo_setup_open = False
+        self._pomo_sig = None
+        self._render_pomo()
+
+    def _start_pomo_from_panel(self):
+        fm = self._pomo_read(self._focus_var, config.POMODORO_FOCUS_MIN,
+                             config.POMODORO_FOCUS_MAX,
+                             config.POMODORO_DEFAULT_FOCUS_MIN)
+        bm = self._pomo_read(self._break_var, config.POMODORO_BREAK_MIN,
+                             config.POMODORO_BREAK_MAX,
+                             config.POMODORO_DEFAULT_BREAK_MIN)
+        self._pomo_setup_open = False
+        self._pomo_action("/api/pomodoro/start",
+                          {"focus_minutes": fm, "break_minutes": bm})
+
+    def _pomo_action(self, path, body=None):
+        try:
+            api(path, "POST", body or {})
+        except Exception as e:
+            messagebox.showerror("番茄钟", str(e), parent=self.root)
+            return
+        self._pomo_sig = None
+        self._poll_pomo()
 
     def _draw_add_btn(self, hover):
         """纯 + 号圆形按钮（取代常驻输入框）。"""
@@ -831,11 +1146,13 @@ class TodoApp:
 
     def on_close(self):
         self._save_geometry()
-        if self._after_id:
-            try:
-                self.root.after_cancel(self._after_id)
-            except Exception:
-                pass
+        for attr in ("_after_id", "_pomo_after", "_pomo_tick_after"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
         self.root.destroy()
 
     def run(self):
