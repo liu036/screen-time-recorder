@@ -173,6 +173,9 @@ class TodoApp:
         self._pomo_lbl = None
         self._focus_var = None
         self._break_var = None
+        self._row_pomo_lbl = None      # 列表行内的倒计时（绑定待办时）
+        self._row_pomo_id = None
+        self._pomo_prev_key = None     # 番茄状态变化 → 刷新行内按钮
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -292,6 +295,13 @@ class TodoApp:
             st = api("/api/pomodoro", timeout=2.0)
             self._pomo = st
             self._pomo_sync_mono = time.monotonic()
+            # 专注状态/绑定的待办变了 → 行内按钮文案与倒计时需要重绘。
+            # 编辑中不更新 key，等下一轮 poll 再补，避免状态被永久跳过。
+            key = (st.get("state"), st.get("todo_id"), st.get("session_id"))
+            if key != self._pomo_prev_key and not self._editing:
+                self._pomo_prev_key = key
+                self._last_sig = None
+                self.refresh()
             if st.get("open_setup") and st.get("state") == "idle":
                 self._pomo_setup_open = True
                 self._pomo_sig = None
@@ -313,14 +323,19 @@ class TodoApp:
     def _tick_pomo(self):
         self._pomo_tick_after = None
         st = self._pomo
-        if (st and self._pomo_lbl is not None
-                and st.get("state") in ("focus", "break")):
+        if (st and st.get("state") in ("focus", "break")
+                and (self._pomo_lbl is not None
+                     or self._row_pomo_lbl is not None)):
             remain = int(st.get("remaining_ms", 0) -
                          (time.monotonic() - self._pomo_sync_mono) * 1000)
-            try:
-                self._pomo_lbl.configure(text=fmt_mmss(max(0, remain)))
-            except Exception:
-                pass
+            text = fmt_mmss(max(0, remain))
+            for lbl in (self._pomo_lbl, self._row_pomo_lbl):
+                if lbl is None:
+                    continue
+                try:
+                    lbl.configure(text=text)
+                except Exception:
+                    pass
         try:
             self._pomo_tick_after = self.root.after(1000, self._tick_pomo)
         except Exception:
@@ -405,13 +420,17 @@ class TodoApp:
                       config.POMODORO_DEFAULT_BREAK_MIN).grid(
             row=1, column=1, sticky="e", padx=(0, 10), pady=(2, 3))
 
+        tk.Label(pad, text="点列表右侧「专注」可直接绑定待办",
+                 font=("Microsoft YaHei UI", 8), fg=MUTED, bg=CARD,
+                 anchor="w").grid(row=2, column=0, columnspan=2,
+                                  sticky="w", padx=10)
         tk.Label(pad, text="步长 5 分钟 · 休息 0 = 只专注不休息",
                  font=("Microsoft YaHei UI", 8), fg=FAINT, bg=CARD,
-                 anchor="w").grid(row=2, column=0, columnspan=2,
+                 anchor="w").grid(row=3, column=0, columnspan=2,
                                   sticky="w", padx=10)
 
         bar = tk.Frame(pad, bg=CARD)
-        bar.grid(row=3, column=0, columnspan=2, sticky="ew",
+        bar.grid(row=4, column=0, columnspan=2, sticky="ew",
                  padx=10, pady=(7, 9))
         start = tk.Label(bar, text="开始专注", font=F_SMALL, fg="#FFFFFF",
                          bg=ACCENT, padx=14, pady=4, cursor="hand2")
@@ -482,7 +501,10 @@ class TodoApp:
         if state == "break":
             mkbtn("结束休息", lambda: self._pomo_action(
                 "/api/pomodoro/skip-break"), DANGER)
-            label = "休息中"
+            nxt = st.get("next_round") or {}
+            fm = int(nxt.get("focus_minutes") or 0)
+            label = ("休息中 · 然后 %d 分钟" % fm) if (
+                st.get("chain_next") and fm) else "休息中"
         else:
             mkbtn("结束", lambda: self._pomo_action(
                 "/api/pomodoro/stop", {"reason": "manual"}), DANGER)
@@ -500,29 +522,45 @@ class TodoApp:
                  anchor="w").pack(side="left", fill="x", expand=True)
 
     def _render_pomo_done(self, st):
-        row = tk.Frame(self.pomo_area, bg=CARD, highlightthickness=1,
+        box = tk.Frame(self.pomo_area, bg=CARD, highlightthickness=1,
                        highlightbackground=FAINT)
-        row.pack(fill="x")
-        tk.Label(row, text="完成 %d 分钟" % (st.get("focus_minutes") or 0),
-                 font=F_SMALL, fg=INK, bg=CARD, padx=10, pady=9).pack(
-            side="left")
+        box.pack(fill="x")
+        nxt = st.get("next_round") or {}
+        title = (nxt.get("title") or "").strip()
+        done = int(nxt.get("focus_minutes") or st.get("focus_minutes") or 0)
 
-        def mkbtn(text, fn, fg=MUTED, bg=CARD):
-            b = tk.Label(row, text=text, font=F_SMALL, fg=fg, bg=bg,
-                         padx=6, pady=3, cursor="hand2")
-            b.pack(side="right", padx=(0, 4))
+        top = tk.Frame(box, bg=CARD)
+        top.pack(fill="x", padx=10, pady=(8, 1))
+        tk.Label(top, text="完成 %d 分钟" % done, font=F_SMALL,
+                 fg=INK, bg=CARD).pack(side="left")
+        if title:
+            tk.Label(top, text=" · " + _ellipsize(title, self._f_small, 130),
+                     font=F_SMALL, fg=MUTED, bg=CARD, anchor="w").pack(
+                side="left")
+
+        bar = tk.Frame(box, bg=CARD)
+        bar.pack(fill="x", padx=10, pady=(3, 8))
+
+        def mkbtn(text, fn, fg=MUTED, bg=BG):
+            b = tk.Label(bar, text=text, font=F_SMALL, fg=fg, bg=bg,
+                         padx=8, pady=4, cursor="hand2")
+            b.pack(side="left", padx=(0, 5))
             b.bind("<Button-1>", lambda e: fn())
             return b
 
-        mkbtn("休息 %d 分" % (st.get("break_minutes") or 0),
-              lambda: self._pomo_action("/api/pomodoro/start-break"),
-              "#FFFFFF", ACCENT)
-        mkbtn("跳过", lambda: self._pomo_action("/api/pomodoro/skip-break"))
-        cfg = st.get("config") or {}
-        mkbtn("再来一个", lambda: self._pomo_action(
-            "/api/pomodoro/start",
-            {"focus_minutes": cfg.get("focus_minutes"),
-             "break_minutes": cfg.get("break_minutes")}))
+        bm = int(st.get("break_minutes") or 0)
+        if bm > 0:
+            mkbtn("休息 %d 分 → 继续" % bm,
+                  lambda: self._pomo_action("/api/pomodoro/start-break",
+                                            {"chain": True}),
+                  "#FFFFFF", ACCENT)
+        else:
+            mkbtn("开始下一轮",
+                  lambda: self._pomo_action("/api/pomodoro/next"),
+                  "#FFFFFF", ACCENT)
+        mkbtn("直接下一轮",
+              lambda: self._pomo_action("/api/pomodoro/next"))
+        mkbtn("结束", lambda: self._pomo_action("/api/pomodoro/skip-break"))
         self._pomo_lbl = None
 
     def _toggle_pomo_setup(self):
@@ -553,6 +591,39 @@ class TodoApp:
         self._pomo_setup_open = False
         self._pomo_action("/api/pomodoro/start",
                           {"focus_minutes": fm, "break_minutes": bm})
+
+    def _pomo_remain_text(self):
+        st = self._pomo or {}
+        remain = int(st.get("remaining_ms", 0) -
+                     (time.monotonic() - self._pomo_sync_mono) * 1000)
+        return fmt_mmss(max(0, remain))
+
+    def _on_focus_click(self, item):
+        """行内「专注」：绑定该待办直接开始；已绑定的那行则展开控制面板。"""
+        st = self._pomo or {}
+        state = st.get("state", "idle")
+        if state in ("focus", "paused") and st.get("todo_id") == item["id"]:
+            self._open_pomo_panel()
+            return
+        if state in ("focus", "paused", "break") and st.get("session_id"):
+            cur = (st.get("title")
+                   or ("休息中" if state == "break" else "自由专注"))
+            if not messagebox.askyesno(
+                    "番茄钟",
+                    "正在「%s」，要中断并开始「%s」吗？"
+                    % (cur, item["title"]), parent=self.root):
+                return
+        cfg = st.get("config") or {}
+        self._pomo_action("/api/pomodoro/start", {
+            "todo_id": item["id"],
+            "focus_minutes": cfg.get("focus_minutes"),
+            "break_minutes": cfg.get("break_minutes"),
+        })
+
+    def _open_pomo_panel(self):
+        self._pomo_setup_open = False
+        self._pomo_sig = None
+        self._render_pomo()
 
     def _pomo_action(self, path, body=None):
         try:
@@ -748,6 +819,8 @@ class TodoApp:
         for w in self.inner.winfo_children():
             w.destroy()
         self._rows = todos
+        self._row_pomo_lbl = None       # 行重建了，旧引用失效
+        self._row_pomo_id = None
         if not todos:
             tk.Label(self.inner, text="没有待办，点右下角 ＋ 添加",
                      font=F_BODY, fg=MUTED, bg=BG, pady=24).pack()
@@ -796,13 +869,36 @@ class TodoApp:
         pri.pack(side="left", padx=(0, 6))
         oval = pri.create_oval(3, 7, 11, 15, fill=PRIO_COLORS[pr], outline="")
 
-        # 先放右侧（时间/删除）：pack 按调用顺序分配空间，
+        # 先放右侧（时间/专注/删除）：pack 按调用顺序分配空间，
         # 若标题先 pack 并 expand，长标题会把右侧控件挤出可视区。
         ts = item.get("remind_ts") or item.get("due_ts")
         ts_text = fmt_when(ts) if ts else ""
         dele = tk.Label(row, text="×", font=("Microsoft YaHei UI", 12),
                         fg=CHK_BORDER, bg=BG, cursor="hand2", padx=4)
         dele.pack(side="right", padx=(0, 2))
+
+        # 专注入口：点一下就用当前默认时长开始，并把这个待办绑到会话上。
+        # 正在专注的那一行变成倒计时，再点展开面板（暂停/结束）。
+        pst = self._pomo or {}
+        pstate = pst.get("state", "idle")
+        is_focus_row = (not is_done and pstate in ("focus", "paused")
+                        and pst.get("todo_id") == item["id"])
+        focus_btn = None
+        focus_w = 0
+        if not is_done:
+            text = self._pomo_remain_text() if is_focus_row else "专注"
+            focus_btn = tk.Label(
+                row, text=text, font=F_SMALL,
+                fg=ACCENT if is_focus_row else "#A79F8C",
+                bg=BG, padx=4, cursor="hand2")
+            focus_btn.pack(side="right", padx=(0, 2))
+            focus_btn.bind("<Button-1>",
+                           lambda e, t=item: self._on_focus_click(t))
+            if is_focus_row:
+                self._row_pomo_lbl = focus_btn
+                self._row_pomo_id = item["id"]
+            focus_w = 46 if is_focus_row else 34
+
         time_lbl = None
         if ts_text:
             overdue = (not is_done) and ts < datetime.now().timestamp() * 1000
@@ -815,7 +911,7 @@ class TodoApp:
         win_w = self.root.winfo_width()
         if win_w <= 1:  # 首次渲染时窗口尚未映射
             win_w = config.TODO_WINDOW_SIZE[0]
-        avail = max(80, win_w - 90)
+        avail = max(80, win_w - 90) - focus_w
         if time_lbl is not None:
             avail -= self._f_small.measure(ts_text) + 14
         shown = _ellipsize(item["title"], font, avail)
@@ -853,6 +949,9 @@ class TodoApp:
                 return
             r.configure(bg=CARD)
             dele.configure(fg=DANGER)
+            if focus_btn is not None:
+                focus_btn.configure(
+                    fg=ACCENT if is_focus_row else "#C08A2E")
             for c in r.winfo_children():
                 if isinstance(c, (tk.Label, tk.Frame)) and c is not dele:
                     try:
@@ -865,6 +964,9 @@ class TodoApp:
                 return
             r.configure(bg=BG)
             dele.configure(fg=CHK_BORDER)
+            if focus_btn is not None:
+                focus_btn.configure(
+                    fg=ACCENT if is_focus_row else "#A79F8C")
             for c in r.winfo_children():
                 if isinstance(c, (tk.Label, tk.Frame)) and c is not dele:
                     try:

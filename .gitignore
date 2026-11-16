@@ -13,6 +13,7 @@ probes/_e2e_*.png
 probes/_todo_*.png
 probes/_shot*.png
 probes/_cdp_*.png
+probes/_pomo_*.png
 
 # ── Python ──
 __pycache__/

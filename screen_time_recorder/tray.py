@@ -134,7 +134,6 @@ class TrayApp:
         self._web_url = None
         self.reminder = None
         self.pomodoro = None
-        self._menu_todos = []
 
     # ---- 托盘图标 ----
     def _add_icon(self):
@@ -247,15 +246,15 @@ class TrayApp:
             self.on_pomodoro_stop()
         elif cmd == 104:
             if self.pomodoro:
-                self.pomodoro.start_break()
+                self.pomodoro.start_break(chain=True)
         elif cmd == 105:
             if self.pomodoro:
                 self.pomodoro.skip_break()
-        elif 200 <= cmd < 300:
-            idx = cmd - 200
-            tid = (self._menu_todos[idx]
-                   if 0 <= idx < len(self._menu_todos) else None)
-            self._start_pomodoro(todo_id=tid)
+        elif cmd == 106:
+            if self.pomodoro:
+                self.pomodoro.next_round()
+        elif cmd == 107:
+            self.open_todo_window(focus=False)
 
     def _append_pomodoro_menu(self, menu):
         """两层子菜单：空闲给开始入口，运行中只给暂停/结束。"""
@@ -273,28 +272,18 @@ class TrayApp:
         if state == "idle":
             win32gui.AppendMenu(sub, win32con.MF_STRING, 100,
                                 "自由专注（%d 分钟）" % fm)
-            self._menu_todos = []
-            try:
-                todos = self.daemon.storage.list_todos("open", limit=8)
-            except Exception:
-                todos = []
-            if todos:
-                win32gui.AppendMenu(sub, win32con.MF_SEPARATOR, 0, "")
-                for i, t in enumerate(todos):
-                    self._menu_todos.append(t["id"])
-                    title = (t["title"] or "").strip()
-                    if len(title) > 18:
-                        title = title[:17] + "…"
-                    win32gui.AppendMenu(sub, win32con.MF_STRING, 200 + i,
-                                        title or "(无标题)")
+            # 待办的专注入口已经放到待办窗口每行上，托盘子菜单不再重复列表
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 107,
+                                "在待办窗口选任务开始…")
             win32gui.AppendMenu(sub, win32con.MF_SEPARATOR, 0, "")
             win32gui.AppendMenu(sub, win32con.MF_STRING, 101,
                                 "自定义时长与休息…")
         elif state == "focus_done":
             win32gui.AppendMenu(
                 sub, win32con.MF_STRING, 104,
-                "开始休息（%d 分钟）" % st.get("break_minutes", 0))
-            win32gui.AppendMenu(sub, win32con.MF_STRING, 105, "跳过休息")
+                "休息 %d 分钟，然后继续" % st.get("break_minutes", 0))
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 106, "直接下一轮")
+            win32gui.AppendMenu(sub, win32con.MF_STRING, 105, "结束")
         elif state == "paused":
             win32gui.AppendMenu(sub, win32con.MF_STRING, 102, "继续")
             win32gui.AppendMenu(sub, win32con.MF_STRING, 103, "结束本次")
@@ -386,6 +375,28 @@ class TrayApp:
     def on_pomodoro_stop(self):
         if self.pomodoro:
             self.pomodoro.stop("manual")
+
+    def _popup(self, kind, title, body):
+        """拉起置顶提醒小窗。
+
+        必须是独立进程：本进程主线程被 PumpMessages() 占着，不能跑 Tk mainloop。
+        用 pythonw 启动，避免闪控制台。
+        """
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            cand = exe[:-len("python.exe")] + "pythonw.exe"
+            if os.path.exists(cand):
+                exe = cand
+        env = os.environ.copy()
+        env["STR_API"] = self._web_url or "http://127.0.0.1:8765"
+        try:
+            subprocess.Popen(
+                [exe, "-m", "screen_time_recorder.pomodoro_popup",
+                 "--kind", kind],
+                cwd=BASE_DIR, env=env,
+                creationflags=0x00000008)      # DETACHED_PROCESS
+        except Exception as e:
+            print(f"[tray] 提醒窗启动失败（{kind}）: {e}")
 
     def _on_pomodoro_state(self, st):
         """番茄钟状态回调：刷新托盘提示（每 5s 一次，避免频繁 NIM_MODIFY）。"""
@@ -498,7 +509,8 @@ class TrayApp:
                 self.daemon.storage, self.notify,
                 state_cb=self._on_pomodoro_state,
                 lock_getter=lambda: self.daemon.collector.lock_state,
-                idle_getter=get_idle_ms)
+                idle_getter=get_idle_ms,
+                popup_cb=self._popup)
         except Exception as e:
             print(f"[tray] 番茄钟服务初始化失败: {e}")
         # 本地仪表盘（127.0.0.1:8765），随采集器常驻
