@@ -91,6 +91,30 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, due_ts);
 CREATE INDEX IF NOT EXISTS idx_todos_remind ON todos(status, remind_ts);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id       INTEGER,                    -- NULL = 自由专注
+    title         TEXT    DEFAULT '',         -- 标题快照（待办改名/删除后仍可读）
+    kind          TEXT    NOT NULL,           -- focus / break
+    started_ts    INTEGER NOT NULL,
+    ended_ts      INTEGER,
+    planned_ms    INTEGER NOT NULL,           -- 本次手动选择的时长
+    focused_ms    INTEGER DEFAULT 0,          -- 实际专注（不含暂停）
+    paused_ms     INTEGER DEFAULT 0,
+    interruptions INTEGER DEFAULT 0,
+    afk_ms        INTEGER DEFAULT 0,
+    status        TEXT    DEFAULT 'running',  -- running/completed/aborted/interrupted
+    report_json   TEXT    DEFAULT '',
+    created_ts    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pomo_started ON pomodoro_sessions(started_ts);
+CREATE INDEX IF NOT EXISTS idx_pomo_status  ON pomodoro_sessions(status);
 """
 
 _TODO_COLS = ("id", "title", "note", "status", "priority", "due_ts",
@@ -102,6 +126,15 @@ _TODO_SELECT = ("SELECT id,title,note,status,priority,due_ts,remind_ts,"
 # 允许通过 update_todo 修改的字段（白名单，防注入 / 防误改）
 _TODO_UPDATABLE = {"title", "note", "status", "priority",
                    "due_ts", "remind_ts", "repeat_rule", "sort_order"}
+
+_POMO_COLS = ("id", "todo_id", "title", "kind", "started_ts", "ended_ts",
+              "planned_ms", "focused_ms", "paused_ms", "interruptions",
+              "afk_ms", "status", "report_json", "created_ts")
+_POMO_SELECT = ("SELECT id,todo_id,title,kind,started_ts,ended_ts,planned_ms,"
+                "focused_ms,paused_ms,interruptions,afk_ms,status,"
+                "report_json,created_ts FROM pomodoro_sessions")
+_POMO_UPDATABLE = {"ended_ts", "focused_ms", "paused_ms", "interruptions",
+                   "afk_ms", "status", "report_json"}
 
 
 def _local_day_start_ms(ts_ms):
@@ -438,6 +471,132 @@ class Storage:
                 (now, day0, day1, day0, day1, day0)).fetchone()
         return {"open": row[0], "overdue": row[1],
                 "due_today": row[2], "done_today": row[3]}
+
+    # ---------- 通用设置（键值对，番茄钟配置等）----------
+    def get_setting(self, key, default=None):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key, value):
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)))
+            self._conn.commit()
+
+    def delete_setting(self, key):
+        with self._lock:
+            n = self._conn.execute(
+                "DELETE FROM settings WHERE key=?", (key,)).rowcount
+            self._conn.commit()
+        return n
+
+    # ---------- 番茄钟 ----------
+    def pomodoro_config(self):
+        """上次使用的专注/休息时长（首次返回内置初始值）。"""
+        def _int(key, default):
+            try:
+                return int(self.get_setting(key, default))
+            except (TypeError, ValueError):
+                return default
+        return {
+            "focus_minutes": _int("pomodoro.focus_minutes",
+                                  config.POMODORO_DEFAULT_FOCUS_MIN),
+            "break_minutes": _int("pomodoro.break_minutes",
+                                  config.POMODORO_DEFAULT_BREAK_MIN),
+        }
+
+    def set_pomodoro_config(self, focus_minutes=None, break_minutes=None):
+        """保存时长（自动夹到合法范围），返回保存后的完整配置。"""
+        if focus_minutes is not None:
+            fm = max(config.POMODORO_FOCUS_MIN,
+                     min(config.POMODORO_FOCUS_MAX, int(focus_minutes)))
+            self.set_setting("pomodoro.focus_minutes", fm)
+        if break_minutes is not None:
+            bm = max(config.POMODORO_BREAK_MIN,
+                     min(config.POMODORO_BREAK_MAX, int(break_minutes)))
+            self.set_setting("pomodoro.break_minutes", bm)
+        return self.pomodoro_config()
+
+    def add_pomodoro_session(self, kind, planned_ms, todo_id=None,
+                             title="", now_ms=None):
+        now = int(now_ms or time.time() * 1000)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO pomodoro_sessions "
+                "(todo_id,title,kind,started_ts,planned_ms,status,created_ts) "
+                "VALUES (?,?,?,?,?,'running',?)",
+                (todo_id, title or "", kind, now, int(planned_ms), now))
+            self._conn.commit()
+            return cur.lastrowid
+
+    def get_pomodoro_session(self, session_id):
+        with self._lock:
+            row = self._conn.execute(
+                _POMO_SELECT + " WHERE id=?", (int(session_id),)).fetchone()
+        return dict(zip(_POMO_COLS, row)) if row else None
+
+    def get_running_pomodoro(self):
+        """当前正在跑的会话（同一时刻最多一条）。"""
+        with self._lock:
+            row = self._conn.execute(
+                _POMO_SELECT + " WHERE status='running' "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(zip(_POMO_COLS, row)) if row else None
+
+    def update_pomodoro_session(self, session_id, **fields):
+        unknown = set(fields) - _POMO_UPDATABLE
+        if unknown:
+            raise ValueError("不支持的字段: " + ", ".join(sorted(unknown)))
+        if not fields:
+            return False
+        sets = [k + "=?" for k in fields]
+        params = list(fields.values()) + [int(session_id)]
+        with self._lock:
+            n = self._conn.execute(
+                "UPDATE pomodoro_sessions SET " + ", ".join(sets) +
+                " WHERE id=?", params).rowcount
+            self._conn.commit()
+        return n > 0
+
+    def finish_pomodoro_session(self, session_id, ended_ts, focused_ms,
+                                paused_ms, interruptions, afk_ms,
+                                status, report_json=""):
+        return self.update_pomodoro_session(
+            session_id, ended_ts=int(ended_ts), focused_ms=int(focused_ms),
+            paused_ms=int(paused_ms), interruptions=int(interruptions),
+            afk_ms=int(afk_ms), status=status,
+            report_json=report_json or "")
+
+    def pomodoro_summary(self, now_ms=None):
+        """今日番茄统计：完成数 / 中止数 / 实际专注总时长。"""
+        now = int(now_ms or time.time() * 1000)
+        day0 = _local_day_start_ms(now)
+        day1 = day0 + 86400000
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT "
+                "COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='aborted' THEN 1 ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='completed' THEN focused_ms "
+                "  ELSE 0 END),0),"
+                "COALESCE(SUM(CASE WHEN status='completed' THEN paused_ms "
+                "  ELSE 0 END),0) "
+                "FROM pomodoro_sessions "
+                "WHERE kind='focus' AND started_ts>=? AND started_ts<?",
+                (day0, day1)).fetchone()
+        return {"completed": row[0], "aborted": row[1],
+                "focus_ms": row[2], "paused_ms": row[3]}
+
+    def recent_pomodoro(self, limit=20):
+        with self._lock:
+            rows = self._conn.execute(
+                _POMO_SELECT + " WHERE kind='focus' "
+                "ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(zip(_POMO_COLS, r)) for r in rows]
 
     # ---------- 用户编辑层（Override，用户数据最高权限）----------
     def add_edit(self, target_type, target_id, action, payload):

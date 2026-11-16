@@ -34,6 +34,21 @@ REMINDER_STARTUP_GRACE_MS = 21600000   # 启动补扫：超 6 小时的逾期合
 TODO_POLL_MS = 3000                    # 待办窗口刷新间隔（只读，轻量）
 TODO_WINDOW_SIZE = (360, 520)          # 便笺窗默认尺寸
 
+# ---------- 番茄钟 ----------
+# 时长由用户手动选择；下面的 25/5 只用于"第一次使用"的初始值，不是固定模式
+POMODORO_TICK_MS = 1000                # 1s tick，仅做算术与文本刷新
+POMODORO_DEFAULT_FOCUS_MIN = 25
+POMODORO_DEFAULT_BREAK_MIN = 5
+POMODORO_FOCUS_MIN = 5
+POMODORO_FOCUS_MAX = 180
+POMODORO_BREAK_MIN = 0                 # 0 = 只专注、不休息
+POMODORO_BREAK_MAX = 60
+POMODORO_STEP_MIN = 5                  # 步进按钮的步长
+POMODORO_IDLE_LIMIT_MS = 300000        # 连续 5 分钟无输入 → 自动暂停（看视频不误判）
+POMODORO_DONE_TIMEOUT_MS = 600000      # focus_done 停留 10 分钟无操作 → 回空闲
+POMODORO_RESUME_GRACE_MS = 120000      # 崩溃恢复：超出计划 2 分钟内仍可继续
+POMODORO_TIP_INTERVAL_MS = 5000        # 托盘 tooltip 刷新节流
+
 # ---------- 噪音过滤：进程名黑名单 ----------
 # 这些进程下的窗口一律不算"应用"（T5 实测：输入体验/Overlay/IME 宿主等）
 NOISE_PROC = {
