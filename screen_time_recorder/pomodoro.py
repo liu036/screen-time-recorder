@@ -86,6 +86,7 @@ class PomodoroService(threading.Thread):
         self._last_state = None
         self._last_cb_mono = 0.0
         self._paused_hint_sent = False
+        self._grace_until_mono = 0.0   # 启动/恢复宽限期
 
         try:
             cfg = storage.pomodoro_config()
@@ -169,9 +170,13 @@ class PomodoroService(threading.Thread):
                 pass
 
     # ---------- 控制 ----------
-    def start(self, focus_minutes=None, break_minutes=None,
-              todo_id=None, title=None):
-        """开始专注。已有会话在跑时先中止旧的。"""
+    def start_focus(self, focus_minutes=None, break_minutes=None,
+                    todo_id=None, title=None):
+        """开始专注。已有会话在跑时先中止旧的。
+
+        注意：不要命名为 start() —— 那会覆盖 threading.Thread.start()，
+        导致后台 tick 线程永远不启动。
+        """
         fm = _clamp(focus_minutes if focus_minutes is not None
                     else self._focus_minutes,
                     config.POMODORO_FOCUS_MIN, config.POMODORO_FOCUS_MAX)
@@ -200,6 +205,8 @@ class PomodoroService(threading.Thread):
             self._interruptions = 0
             self._done_since_mono = None
             self._paused_hint_sent = False
+            self._grace_until_mono = (self.clock()
+                                      + config.POMODORO_START_GRACE_S)
             self._focus_minutes, self._break_minutes = fm, bm
             self._last_state = "focus"
         try:
@@ -235,6 +242,8 @@ class PomodoroService(threading.Thread):
             self._pause_reason = ""
             self._paused_by_auto = False
             self._paused_hint_sent = False
+            self._grace_until_mono = (self.clock()
+                                      + config.POMODORO_START_GRACE_S)
             self._persist_progress_locked()
         self._emit_state()
         return self.status()
@@ -354,6 +363,9 @@ class PomodoroService(threading.Thread):
         return max(0, total)
 
     def _auto_pause_reason(self):
+        # 刚开始/刚恢复时不要因为"之前的空闲"立刻暂停
+        if self.clock() < self._grace_until_mono:
+            return ""
         try:
             if int(self.lock_getter() or 0) == 2:
                 return "锁屏"
@@ -532,6 +544,8 @@ class PomodoroService(threading.Thread):
             self._accum_pause_ms = int(row["paused_ms"] or 0)
             self._interruptions = int(row["interruptions"] or 0)
             self._afk_ms = int(row["afk_ms"] or 0)
+            self._grace_until_mono = (self.clock()
+                                      + config.POMODORO_START_GRACE_S)
             self._last_state = self._state
             print("[pomodoro] 恢复未结束会话 #%d（%s）" % (row["id"], row["kind"]))
         else:

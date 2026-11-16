@@ -45,6 +45,7 @@ POMODORO_BREAK_MIN = 0                 # 0 = 只专注、不休息
 POMODORO_BREAK_MAX = 60
 POMODORO_STEP_MIN = 5                  # 步进按钮的步长
 POMODORO_IDLE_LIMIT_MS = 300000        # 连续 5 分钟无输入 → 自动暂停（看视频不误判）
+POMODORO_START_GRACE_S = 10            # 开始/恢复后的宽限期：不因"之前的空闲"立刻暂停
 POMODORO_DONE_TIMEOUT_MS = 600000      # focus_done 停留 10 分钟无操作 → 回空闲
 POMODORO_RESUME_GRACE_MS = 120000      # 崩溃恢复：超出计划 2 分钟内仍可继续
 POMODORO_TIP_INTERVAL_MS = 5000        # 托盘 tooltip 刷新节流

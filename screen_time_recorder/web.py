@@ -189,7 +189,7 @@ def create_app(storage, pomodoro=None):
             tid = _int_or_none(body.get("todo_id"))
         except (TypeError, ValueError):
             return jsonify({"error": "时长与待办 id 必须是整数"}), 400
-        return jsonify({"ok": True, "state": pomodoro.start(
+        return jsonify({"ok": True, "state": pomodoro.start_focus(
             focus_minutes=fm, break_minutes=bm, todo_id=tid,
             title=body.get("title"))})
 

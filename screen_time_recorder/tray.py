@@ -360,9 +360,9 @@ class TrayApp:
             return
         try:
             cfg = self.daemon.storage.pomodoro_config()
-            self.pomodoro.start(focus_minutes=cfg["focus_minutes"],
-                                break_minutes=cfg["break_minutes"],
-                                todo_id=todo_id)
+            self.pomodoro.start_focus(focus_minutes=cfg["focus_minutes"],
+                                      break_minutes=cfg["break_minutes"],
+                                      todo_id=todo_id)
         except Exception as e:
             _show_message_box("番茄钟", "启动失败：%s" % e, error=True)
 

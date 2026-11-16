@@ -71,7 +71,7 @@ def test_start_and_countdown():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p1.db"))
     try:
         svc, clock, wall, notes, _, _ = make_service(st)
-        s = svc.start(focus_minutes=50, break_minutes=10, title="写方案")
+        s = svc.start_focus(focus_minutes=50, break_minutes=10, title="写方案")
         assert s["state"] == "focus"
         assert s["planned_ms"] == 50 * 60000
         assert s["remaining_ms"] == 50 * 60000
@@ -94,7 +94,7 @@ def test_pause_and_resume():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p2.db"))
     try:
         svc, clock, wall, _, _, _ = make_service(st)
-        svc.start(focus_minutes=30, break_minutes=5)
+        svc.start_focus(focus_minutes=30, break_minutes=5)
         clock.advance(300)
         wall.advance(300)
         svc.tick()
@@ -126,7 +126,9 @@ def test_auto_pause_on_lock_and_idle():
         lock = {"v": 0}
         idle = {"v": 0}
         svc, clock, wall, notes, _, _ = make_service(st, lock, idle)
-        svc.start(focus_minutes=25, break_minutes=5)
+        svc.start_focus(focus_minutes=25, break_minutes=5)
+        clock.advance(11)       # 过启动宽限期（不因历史空闲立刻暂停）
+        wall.advance(11)
 
         lock["v"] = 2
         svc.tick()
@@ -142,6 +144,8 @@ def test_auto_pause_on_lock_and_idle():
         wall.advance(180)
         svc.resume()
         assert svc.status()["paused_ms"] == 180000, svc.status()
+        clock.advance(11)           # 过恢复宽限期
+        wall.advance(11)
 
         idle["v"] = 300000
         svc.tick()
@@ -157,7 +161,7 @@ def test_complete_and_report():
     try:
         svc, clock, wall, notes, _, _ = make_service(st)
         seed_events(st, wall.ms)
-        svc.start(focus_minutes=50, break_minutes=10, title="写方案")
+        svc.start_focus(focus_minutes=50, break_minutes=10, title="写方案")
 
         clock.advance(50 * 60)
         wall.advance(50 * 60)
@@ -190,7 +194,7 @@ def test_abort_keeps_partial_report():
     try:
         svc, clock, wall, _, _, _ = make_service(st)
         seed_events(st, wall.ms)
-        svc.start(focus_minutes=50, break_minutes=0)
+        svc.start_focus(focus_minutes=50, break_minutes=0)
         clock.advance(20 * 60)
         wall.advance(20 * 60)
         svc.stop("manual")
@@ -209,7 +213,7 @@ def test_break_zero_goes_idle():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p6.db"))
     try:
         svc, clock, wall, _, _, _ = make_service(st)
-        svc.start(focus_minutes=5, break_minutes=0)
+        svc.start_focus(focus_minutes=5, break_minutes=0)
         clock.advance(5 * 60)
         wall.advance(5 * 60)
         svc.tick()
