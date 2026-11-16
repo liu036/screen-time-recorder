@@ -41,13 +41,16 @@ class FakeWall:
 def make_service(st, lock_val=None, idle_val=None):
     clock, wall = FakeClock(), FakeWall()
     notes = []
+    popups = []
     lock = lock_val if lock_val is not None else {"v": 0}
     idle = idle_val if idle_val is not None else {"v": 0}
     svc = PomodoroService(
         st, notifier=lambda t, b: notes.append((t, b)),
         lock_getter=lambda: lock["v"],
         idle_getter=lambda: idle["v"],
+        popup_cb=lambda kind, t, b: popups.append((kind, t, b)),
         clock=clock, wall_ms=wall, tick_ms=1000)
+    svc.test_popups = popups
     return svc, clock, wall, notes, lock, idle
 
 
@@ -189,6 +192,79 @@ def test_complete_and_report():
         st.close()
 
 
+def test_chain_break_then_auto_focus():
+    """专注 → 休息（chain）→ 休息到点自动开下一轮，继承待办与时长。"""
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p9.db"))
+    try:
+        svc, clock, wall, notes, _, _ = make_service(st)
+        tid = st.add_todo("写周报")
+        svc.start_focus(focus_minutes=5, break_minutes=2, todo_id=tid)
+
+        clock.advance(5 * 60)
+        wall.advance(5 * 60)
+        svc.tick()
+        s = svc.status()
+        assert s["state"] == "focus_done", s
+        assert s["next_round"]["todo_id"] == tid, s["next_round"]
+        assert s["next_round"]["focus_minutes"] == 5
+        assert any(p[0] == "focus_done" for p in svc.test_popups), \
+            "专注结束应拉起提醒窗"
+
+        svc.start_break(chain=True)
+        s = svc.status()
+        assert s["state"] == "break" and s["chain_next"] is True, s
+        assert any(p[0] == "focus_done" for p in svc.test_popups)
+
+        clock.advance(2 * 60)
+        wall.advance(2 * 60)
+        svc.tick()                       # 休息到点 → 自动开下一轮
+        s = svc.status()
+        assert s["state"] == "focus", s
+        assert s["todo_id"] == tid and s["title"] == "写周报", s
+        assert s["planned_ms"] == 5 * 60000
+        assert s["chain_next"] is False
+        assert any(p[0] == "break_done" for p in svc.test_popups), \
+            "休息结束应有轻提示"
+        assert any(n[0] == "休息结束" for n in notes)
+        print("连续番茄：休息后自动接下一轮 / 继承待办 OK")
+    finally:
+        st.close()
+
+
+def test_next_round_skips_break():
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p10.db"))
+    try:
+        svc, clock, wall, _, _, _ = make_service(st)
+        tid = st.add_todo("写代码")
+        svc.start_focus(focus_minutes=5, break_minutes=5, todo_id=tid)
+        clock.advance(5 * 60)
+        wall.advance(5 * 60)
+        svc.tick()
+        assert svc.status()["state"] == "focus_done"
+
+        svc.next_round()                 # 不休息，直接下一轮
+        s = svc.status()
+        assert s["state"] == "focus" and s["todo_id"] == tid, s
+        assert s["planned_ms"] == 5 * 60000
+        print("直接下一轮：跳过休息 / 继承待办 OK")
+    finally:
+        st.close()
+
+
+def test_set_config_updates_memory():
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p11.db"))
+    try:
+        svc, _, _, _, _, _ = make_service(st)
+        cfg = svc.set_config(45, 8)
+        assert cfg == {"focus_minutes": 45, "break_minutes": 8}, cfg
+        assert st.pomodoro_config() == cfg
+        s = svc.start_focus()            # 不传时长 → 用刚改的默认值
+        assert s["planned_ms"] == 45 * 60000, s
+        print("设置面板改时长 → 立即生效 OK")
+    finally:
+        st.close()
+
+
 def test_abort_keeps_partial_report():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p5.db"))
     try:
@@ -267,6 +343,9 @@ if __name__ == "__main__":
     test_pause_and_resume()
     test_auto_pause_on_lock_and_idle()
     test_complete_and_report()
+    test_chain_break_then_auto_focus()
+    test_next_round_skips_break()
+    test_set_config_updates_memory()
     test_abort_keeps_partial_report()
     test_break_zero_goes_idle()
     test_config_clamp_and_persist()

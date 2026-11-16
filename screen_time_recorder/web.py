@@ -219,7 +219,16 @@ def create_app(storage, pomodoro=None):
     def api_pomodoro_start_break():
         if pomodoro is None:
             return _no_service()
-        return jsonify({"ok": True, "state": pomodoro.start_break()})
+        body = request.get_json(silent=True) or {}
+        return jsonify({"ok": True, "state": pomodoro.start_break(
+            chain=bool(body.get("chain")))})
+
+    @app.post("/api/pomodoro/next")
+    def api_pomodoro_next():
+        """跳过休息，沿用上一轮参数直接开始下一轮。"""
+        if pomodoro is None:
+            return _no_service()
+        return jsonify({"ok": True, "state": pomodoro.next_round()})
 
     @app.post("/api/pomodoro/skip-break")
     def api_pomodoro_skip_break():
@@ -253,8 +262,14 @@ def create_app(storage, pomodoro=None):
     def api_pomodoro_settings_put():
         body = request.get_json(silent=True) or {}
         try:
-            cfg = storage.set_pomodoro_config(
-                body.get("focus_minutes"), body.get("break_minutes"))
+            # 服务在跑时由它统一落库并同步内存默认值，避免「改了设置但下次
+            # 开始仍用旧时长」；服务没起（CLI 场景）就直接写库。
+            if pomodoro is not None:
+                cfg = pomodoro.set_config(body.get("focus_minutes"),
+                                          body.get("break_minutes"))
+            else:
+                cfg = storage.set_pomodoro_config(
+                    body.get("focus_minutes"), body.get("break_minutes"))
         except (TypeError, ValueError):
             return jsonify({"error": "时长必须是整数"}), 400
         return jsonify(cfg)

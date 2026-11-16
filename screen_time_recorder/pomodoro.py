@@ -4,6 +4,8 @@
 设计要点：
 - 计时用 monotonic，落库用 wall clock；暂停时长单独累计，不受系统时间调整影响；
 - 到点不自动休息：进入 focus_done，等用户选择（超时才回空闲）；
+- 连续番茄（chain）：专注结束后选「休息并继续」→ 休息到点立即自动开下一轮，
+  继承上一轮的待办、标题与时长，形成 专注→休息→专注 的闭环；
 - 锁屏 / 连续 5 分钟无输入 → 自动暂停；恢复活跃只提示、不自动继续；
 - 结束时用该时间区间向 ActivityService 要真实应用/内容分布，生成专注报告；
 - 会话状态实时落库，进程崩溃后可恢复或标记 interrupted。
@@ -48,20 +50,22 @@ class PomodoroService(threading.Thread):
     """focus / paused / focus_done / break / idle 五态。"""
 
     def __init__(self, storage, notifier=None, state_cb=None,
-                 lock_getter=None, idle_getter=None,
+                 lock_getter=None, idle_getter=None, popup_cb=None,
                  clock=None, wall_ms=None, tick_ms=None):
         """
         storage:      Storage
-        notifier:     callable(title, body) -> bool
+        notifier:     callable(title, body) -> bool（托盘气泡）
         state_cb:     callable(status_dict)，用于刷新托盘 tooltip
         lock_getter:  callable() -> int（2 = 锁屏）
         idle_getter:  callable() -> int（毫秒）
+        popup_cb:     callable(kind, title, body)，拉起置顶提醒小窗
         clock:        callable() -> 秒，默认 time.monotonic（测试可注入）
         wall_ms:      callable() -> 毫秒，默认 time.time
         """
         super().__init__(daemon=True, name="pomodoro")
         self.storage = storage
         self.notifier = notifier or (lambda t, b: False)
+        self.popup_cb = popup_cb
         self.state_cb = state_cb
         self.lock_getter = lock_getter or (lambda: 0)
         self.idle_getter = idle_getter or (lambda: 0)
@@ -87,6 +91,8 @@ class PomodoroService(threading.Thread):
         self._last_cb_mono = 0.0
         self._paused_hint_sent = False
         self._grace_until_mono = 0.0   # 启动/恢复宽限期
+        self._chain_next = False       # 休息结束后是否自动开始下一轮
+        self._next_round = None        # 下一轮的参数（专注结束时就定好）
 
         try:
             cfg = storage.pomodoro_config()
@@ -117,6 +123,7 @@ class PomodoroService(threading.Thread):
     def tick(self):
         changed = False
         notify = None
+        auto_next = None
         cb = False
 
         with self._lock:
@@ -143,12 +150,27 @@ class PomodoroService(threading.Thread):
                         >= config.POMODORO_DONE_TIMEOUT_MS):
                     self._state = "idle"
                     self._session = None
+                    self._done_since_mono = None
+                    self._next_round = None
+                    self._chain_next = False
                     changed = True
             elif self._state == "break":
                 if self._elapsed_ms_locked() >= int(self._session["planned_ms"]):
+                    chain = bool(self._chain_next and self._next_round)
+                    if chain:
+                        auto_next = dict(self._next_round)
                     self._finish_break_locked()
-                    notify = ("休息结束", "准备好下一个番茄钟了吗？点托盘「番茄钟」开始。")
+                    self._chain_next = False
                     changed = True
+                    if chain:
+                        notify = ("休息结束",
+                                  "已自动开始下一个番茄：专注 %d 分钟。"
+                                  % auto_next["focus_minutes"],
+                                  "break_done")
+                    else:
+                        notify = ("休息结束",
+                                  "准备好了就点「番茄钟」开始下一个。",
+                                  "break_done")
 
             if changed or self._state != self._last_state:
                 self._last_state = self._state
@@ -158,11 +180,14 @@ class PomodoroService(threading.Thread):
                 self._last_cb_mono = now_mono
                 cb = True
 
+        # 通知与自动开轮必须在锁外：start_focus 自己会拿同一把不可重入锁
         if notify:
+            self._announce(*notify)
+        if auto_next:
             try:
-                self.notifier(*notify)
-            except Exception:
-                pass
+                self.start_focus(**auto_next)
+            except Exception as e:
+                print("[pomodoro] 自动开始下一轮失败: %s" % e)
         if cb and self.state_cb:
             try:
                 self.state_cb(self.status())
@@ -208,6 +233,8 @@ class PomodoroService(threading.Thread):
             self._grace_until_mono = (self.clock()
                                       + config.POMODORO_START_GRACE_S)
             self._focus_minutes, self._break_minutes = fm, bm
+            self._chain_next = False
+            self._next_round = None
             self._last_state = "focus"
         try:
             self.storage.set_pomodoro_config(fm, bm)
@@ -257,15 +284,28 @@ class PomodoroService(threading.Thread):
         self._emit_state()
         return self.status()
 
-    def start_break(self):
+    def start_break(self, chain=False):
+        """开始休息。chain=True 时休息到点自动开始下一轮专注。"""
         with self._lock:
             if self._state not in ("focus_done", "idle"):
                 return self.status()
+            self._chain_next = bool(chain)
+            if chain and not self._next_round:
+                # 理论上 _next_round 在专注结束时就已生成；兜底用当前配置
+                self._next_round = {
+                    "focus_minutes": self._focus_minutes,
+                    "break_minutes": self._break_minutes,
+                }
             bm = self._break_minutes
             if bm <= 0:
+                # 没有休息时长：chain 直接落到下一轮
+                immediate = (dict(self._next_round)
+                             if (chain and self._next_round) else None)
                 self._state = "idle"
                 self._session = None
+                self._chain_next = False
             else:
+                immediate = None
                 planned = bm * 60000
                 sid = self.storage.add_pomodoro_session(
                     "break", planned, title="休息", now_ms=self.wall_ms())
@@ -278,17 +318,55 @@ class PomodoroService(threading.Thread):
                 self._interruptions = 0
                 self._done_since_mono = None
                 self._last_state = "break"
+        if immediate:
+            return self.start_focus(**immediate)
         self._emit_state()
         return self.status()
 
+    def next_round(self):
+        """跳过休息，沿用上一轮的待办与时长直接开下一轮。"""
+        with self._lock:
+            if self._state != "focus_done":
+                return self.status()
+            nxt = dict(self._next_round or {})
+            self._state = "idle"
+            self._session = None
+            self._done_since_mono = None
+            self._chain_next = False
+            self._last_state = "idle"
+        if not nxt:
+            nxt = {"focus_minutes": self._focus_minutes,
+                   "break_minutes": self._break_minutes}
+        return self.start_focus(**nxt)
+
+    def set_config(self, focus_minutes=None, break_minutes=None):
+        """更新默认时长（设置面板改了就立即生效，不必等下一次 start）。"""
+        with self._lock:
+            fm = _clamp(focus_minutes if focus_minutes is not None
+                        else self._focus_minutes,
+                        config.POMODORO_FOCUS_MIN, config.POMODORO_FOCUS_MAX)
+            bm = _clamp(break_minutes if break_minutes is not None
+                        else self._break_minutes,
+                        config.POMODORO_BREAK_MIN, config.POMODORO_BREAK_MAX)
+            self._focus_minutes, self._break_minutes = fm, bm
+        try:
+            self.storage.set_pomodoro_config(fm, bm)
+        except Exception:
+            pass
+        self._emit_state()
+        return {"focus_minutes": fm, "break_minutes": bm}
+
     def skip_break(self):
-        """跳过休息 / 结束 focus_done，回到空闲。"""
+        """跳过休息 / 结束 focus_done，回到空闲（不会自动开下一轮）。"""
         with self._lock:
             if self._state == "break" and self._session:
                 self._finish_break_locked()
             else:
                 self._state = "idle"
                 self._session = None
+                self._done_since_mono = None
+                self._chain_next = False
+                self._next_round = None
         self._emit_state()
         return self.status()
 
@@ -313,6 +391,8 @@ class PomodoroService(threading.Thread):
             "config": cfg,
             "today": self.storage.pomodoro_summary(self.wall_ms()),
             "open_setup": self.storage.get_setting("pomodoro.open_setup") == "1",
+            "chain_next": bool(self._chain_next),
+            "next_round": dict(self._next_round or {}),
         }
         if self._session:
             elapsed = self._elapsed_ms_locked()
@@ -421,13 +501,21 @@ class PomodoroService(threading.Thread):
         self._session = self.storage.get_pomodoro_session(
             self._session["id"]) or self._session
         self._done_since_mono = self.clock()
+        # 提前定好下一轮参数：从本轮会话继承待办、标题与时长
+        done_minutes = max(1, planned // 60000)
+        self._next_round = {
+            "focus_minutes": done_minutes,
+            "break_minutes": self._break_minutes,
+            "todo_id": self._session.get("todo_id"),
+            "title": self._session.get("title") or "",
+        }
 
         rate = report.get("rate")
         rate_txt = ("专注率 %d%%" % round(rate * 100)) if rate is not None else ""
         if self._break_minutes > 0:
             self._state = "focus_done"
-            body = "已完成 %d 分钟%s。要休息 %d 分钟吗？点击选择。" % (
-                self._focus_minutes,
+            body = "已完成 %d 分钟%s。休息 %d 分钟后自动开始下一轮。" % (
+                done_minutes,
                 ("，" + rate_txt) if rate_txt else "",
                 self._break_minutes)
             title = "专注结束"
@@ -435,11 +523,11 @@ class PomodoroService(threading.Thread):
             self._state = "idle"
             self._session = None
             body = "已完成 %d 分钟%s。" % (
-                self._focus_minutes,
+                done_minutes,
                 ("，" + rate_txt) if rate_txt else "")
             title = "专注完成"
         self._last_state = self._state
-        return (title, body), True
+        return (title, body, "focus_done"), True
 
     def _finish_break_locked(self):
         if not self._session:
@@ -454,6 +542,7 @@ class PomodoroService(threading.Thread):
             pass
         self._state = "idle"
         self._session = None
+        self._chain_next = False
 
     def _abort_locked(self, reason):
         if not self._session:
@@ -507,7 +596,9 @@ class PomodoroService(threading.Thread):
         out["total_ms"] = total
         out["work_ms"] = work
         out["fun_ms"] = fun
-        if focused_ms > 0:
+        # 采集覆盖不足一半时不评判专注率：刚启动/采集暂停时 total 会很小，
+        # 直接算会得出误导性的 0%。
+        if focused_ms > 0 and total >= focused_ms * 0.5:
             out["rate"] = max(0.0, min(1.0, work / float(focused_ms)))
         out["by_cat"] = sorted(by_cat.items(), key=lambda x: -x[1])[:6]
         out["top_apps"] = sorted(by_app.items(), key=lambda x: -x[1])[:5]
@@ -564,6 +655,16 @@ class PomodoroService(threading.Thread):
             self.notifier(title, body)
         except Exception:
             pass
+
+    def _announce(self, title, body, kind=None):
+        """气泡必发；kind 非空时额外拉起置顶提醒小窗。"""
+        self._notify(title, body)
+        if not kind or not self.popup_cb:
+            return
+        try:
+            self.popup_cb(kind, title, body)
+        except Exception as e:
+            print("[pomodoro] 提醒窗拉起失败: %s" % e)
 
     def _emit_state(self):
         if not self.state_cb:
