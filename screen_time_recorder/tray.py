@@ -17,7 +17,6 @@ from datetime import datetime
 import win32api
 import win32con
 import win32gui
-import pywintypes
 
 from PIL import Image, ImageDraw
 

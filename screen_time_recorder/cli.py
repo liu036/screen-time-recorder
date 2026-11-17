@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """CLI：查看 / 导出 / 删除（MVP-7）。"""
 import sys
-import io
 import json
 import csv
 import time
@@ -16,7 +15,6 @@ try:
 except Exception:
     pass
 
-from .storage import Storage
 from .classifier import ActivityService
 
 

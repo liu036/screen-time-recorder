@@ -17,14 +17,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # ---------- 采集节奏 ----------
 HOOK_POLL_MS = 250          # 轮询兜底间隔（事件驱动为主，轮询补漏）
-IDLE_POLL_MS = 1000         # AFK 空闲检测间隔
 SNAPSHOT_INTERVAL_MS = 1000  # 可见性快照：1s 检测布局，变化才写
 HEARTBEAT_MS = 60000        # 保活心跳（事件驱动 + 60s 心跳，非 1s 采样）
 
 # ---------- 产品决策参数 ----------
 MIN_ACTIVITY_DURATION_MS = 60000  # 非内容活动段低于 1 分钟不记录（应用级碎片）
 MIN_CONTENT_DISPLAY_MS = 60000    # 内容明细低于 1 分钟不展示（时长仍计入应用统计）
-SWITCH_MIN_DURATION_MS = 2000     # 历史阈值（<2s 合并），当前不再使用
 AFK_THRESHOLD_MS = 90000          # 默认 90s 无输入判定空闲（F2）
 
 # ---------- 待办提醒 ----------
