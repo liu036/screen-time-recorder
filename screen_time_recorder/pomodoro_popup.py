@@ -183,7 +183,8 @@ class Popup:
             minutes = int(st["planned_ms"]) // 60000
         title = (st.get("title") or "").strip()
 
-        tk.Label(card, text="专注 %d 分钟完成" % minutes,
+        head = ("专注 %d 分钟完成" % minutes) if minutes else "专注完成"
+        tk.Label(card, text=head,
                  font=self.f_big, fg=INK, bg=CARD, anchor="w").pack(
             fill="x", padx=14, pady=(6, 0))
 

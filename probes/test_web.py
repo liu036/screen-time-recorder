@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -57,6 +58,24 @@ def main():
     print(f"GET /api/app ({app_name}) ->", status,
           "items", len(a["items"]), "total_ms", a["total_ms"])
     assert a["items"]
+
+    def status_of(path, method="GET", payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            base + path, data=data, method=method,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    assert status_of("/api/day?date=2026-13-99") == 400
+    assert status_of("/api/week?start=bad") == 400
+    assert status_of("/api/app?date=bad&app=x") == 400
+    assert status_of("/api/edits?date=bad") == 400
+    assert status_of("/api/todos", "POST", {"title": "   "}) == 400
+    print("非法日期 / 空标题 → 400 OK")
 
     status, body = get(base + "/")
     print("GET / ->", status, "html bytes", len(body))

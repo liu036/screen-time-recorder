@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import webbrowser
+from datetime import datetime
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
@@ -17,6 +18,14 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HTML_PATH = os.path.join(BASE, "dashboard_live.html")
 ASSETS_DIR = os.path.join(BASE, "assets")
 DEFAULT_PORT = 8765
+
+
+def _valid_date(value):
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def create_app(storage, pomodoro=None):
@@ -38,6 +47,8 @@ def create_app(storage, pomodoro=None):
     @app.get("/api/day")
     def api_day():
         date = request.args.get("date")
+        if date and not _valid_date(date):
+            return jsonify({"error": "date 格式应为 YYYY-MM-DD"}), 400
         if not date:
             days = dashboard.available_days(storage)
             if not days:
@@ -52,6 +63,8 @@ def create_app(storage, pomodoro=None):
     @app.get("/api/week")
     def api_week():
         start = request.args.get("start")
+        if start and not _valid_date(start):
+            return jsonify({"error": "start 格式应为 YYYY-MM-DD"}), 400
         if not start:
             days = dashboard.available_days(storage)
             if not days:
@@ -65,12 +78,16 @@ def create_app(storage, pomodoro=None):
         app_name = request.args.get("app")
         if not date or not app_name:
             return jsonify({"error": "date and app are required"}), 400
+        if not _valid_date(date):
+            return jsonify({"error": "date 格式应为 YYYY-MM-DD"}), 400
         return jsonify(dashboard.app_detail(storage, date, app_name))
 
     @app.get("/api/edits")
     def api_edits():
-        return jsonify({"edits": dashboard.list_edits(
-            storage, request.args.get("date"))})
+        date = request.args.get("date")
+        if date and not _valid_date(date):
+            return jsonify({"error": "date 格式应为 YYYY-MM-DD"}), 400
+        return jsonify({"edits": dashboard.list_edits(storage, date)})
 
     @app.post("/api/edit")
     def api_edit():
@@ -109,9 +126,12 @@ def create_app(storage, pomodoro=None):
     @app.post("/api/todos")
     def api_todo_add():
         body = request.get_json(silent=True) or {}
+        title = (body.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "标题不能为空"}), 400
         try:
             tid = storage.add_todo(
-                body.get("title"), body.get("note") or "",
+                title, body.get("note") or "",
                 _as_ms(body.get("due_ts")), _as_ms(body.get("remind_ts")),
                 body.get("priority", 1))
         except (ValueError, TypeError) as e:

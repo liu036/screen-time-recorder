@@ -290,8 +290,14 @@ def test_break_zero_goes_idle():
         clock.advance(5 * 60)
         wall.advance(5 * 60)
         svc.tick()
-        assert svc.status()["state"] == "idle", svc.status()
-        print("休息 0 分钟：到点直接回空闲 OK")
+        s = svc.status()
+        assert s["state"] == "idle", s
+        assert s["next_round"]["focus_minutes"] == 5, s["next_round"]
+        # 休息 0 时专注完成直接回 idle，弹窗的「开始下一轮」仍要有效
+        svc.next_round()
+        s = svc.status()
+        assert s["state"] == "focus" and s["planned_ms"] == 5 * 60000, s
+        print("休息 0 分钟：到点回空闲，仍可开始下一轮 OK")
     finally:
         st.close()
 

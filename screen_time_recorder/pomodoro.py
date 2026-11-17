@@ -323,19 +323,21 @@ class PomodoroService(threading.Thread):
         return self.status()
 
     def next_round(self):
-        """跳过休息，沿用上一轮的待办与时长直接开下一轮。"""
+        """跳过休息，沿用上一轮的待办与时长直接开下一轮。
+
+        也接受 idle：休息设为 0 时专注完成会直接回 idle，弹窗上的
+        「开始下一轮」此时仍应有效（_next_round 还在）。
+        """
         with self._lock:
-            if self._state != "focus_done":
+            if (self._state not in ("focus_done", "idle")
+                    or not self._next_round):
                 return self.status()
-            nxt = dict(self._next_round or {})
+            nxt = dict(self._next_round)
             self._state = "idle"
             self._session = None
             self._done_since_mono = None
             self._chain_next = False
             self._last_state = "idle"
-        if not nxt:
-            nxt = {"focus_minutes": self._focus_minutes,
-                   "break_minutes": self._break_minutes}
         return self.start_focus(**nxt)
 
     def set_config(self, focus_minutes=None, break_minutes=None):
