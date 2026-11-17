@@ -108,6 +108,7 @@ class TodoApp(PomodoroPanelMixin):
         self._break_var = None
         self._row_pomo_lbl = None      # 列表行内的倒计时（绑定待办时）
         self._row_pomo_id = None
+        self._pomo_todo = None         # 从行内「专注」带入设置面板的待办
         self._pomo_prev_key = None     # 番茄状态变化 → 刷新行内按钮
         # Tk 不是线程安全的：后台线程只往队列里放回调，由主线程定时取出执行
         self._ui_queue = queue.Queue()

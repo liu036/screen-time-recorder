@@ -238,7 +238,7 @@ class PomodoroService(threading.Thread):
         notify = None
         with self._lock:
             if self._state != "focus":
-                return self.status()
+                return self._status_locked()   # 已在锁内，不能再走 status()
             self._pause_locked(reason)
         self._emit_state()
         return self.status()
@@ -246,7 +246,7 @@ class PomodoroService(threading.Thread):
     def resume(self):
         with self._lock:
             if self._state != "paused":
-                return self.status()
+                return self._status_locked()
             now = self.clock()
             if self._pause_started_mono:
                 paused = int((now - self._pause_started_mono) * 1000)
@@ -268,7 +268,7 @@ class PomodoroService(threading.Thread):
         """中止当前会话（专注会生成截至此刻的报告）。"""
         with self._lock:
             if self._state == "idle":
-                return self.status()
+                return self._status_locked()
             self._abort_locked(reason)
         self._emit_state()
         return self.status()
@@ -277,7 +277,7 @@ class PomodoroService(threading.Thread):
         """开始休息。chain=True 时休息到点自动开始下一轮专注。"""
         with self._lock:
             if self._state not in ("focus_done", "idle"):
-                return self.status()
+                return self._status_locked()
             self._chain_next = bool(chain)
             if chain and not self._next_round:
                 # 理论上 _next_round 在专注结束时就已生成；兜底用当前配置
@@ -321,7 +321,7 @@ class PomodoroService(threading.Thread):
         with self._lock:
             if (self._state not in ("focus_done", "idle")
                     or not self._next_round):
-                return self.status()
+                return self._status_locked()
             nxt = dict(self._next_round)
             self._state = "idle"
             self._session = None
@@ -529,6 +529,12 @@ class PomodoroService(threading.Thread):
         self._state = "idle"
         self._session = None
         self._chain_next = False
+        # 不接下一轮的休息结束后，回到「时间界面」：窗口轮询到
+        # idle + open_setup 会自动展开时长面板（与托盘「自定义时长」同一机制）。
+        try:
+            self.storage.set_setting("pomodoro.open_setup", "1")
+        except Exception:
+            pass
 
     def _abort_locked(self, reason):
         if not self._session:

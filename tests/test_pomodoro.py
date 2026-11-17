@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -248,6 +249,69 @@ def test_next_round_skips_break():
         st.close()
 
 
+def test_guards_do_not_deadlock():
+    """错误状态下调控制方法必须立即返回。
+
+    _pause/_resume/_stop/_start_break/_next_round 的 guard 在持锁时
+    曾经 return self.status()，而 status() 要再拿同一把不可重入锁 → 死锁。
+    一旦发生，tick 线程和所有状态查询都会永久卡住。
+    """
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p13.db"))
+    try:
+        svc, _, _, _, _, _ = make_service(st)
+
+        def call(name, fn, timeout=2.0):
+            box = {}
+            t = threading.Thread(target=lambda: box.setdefault("v", fn()),
+                                 daemon=True)
+            t.start()
+            t.join(timeout)
+            assert not t.is_alive(), "%s 在错误状态下死锁" % name
+            return box.get("v")
+
+        call("stop(idle)", lambda: svc.stop())
+        call("pause(idle)", lambda: svc.pause())
+        call("resume(idle)", lambda: svc.resume())
+        call("start_break(idle)", lambda: svc.start_break())
+        call("next_round(idle)", lambda: svc.next_round())
+
+        svc.start_focus(5, 5)
+        call("start_break(focus)", lambda: svc.start_break())
+        call("resume(focus)", lambda: svc.resume())
+        svc.stop()
+        print("错误状态调用不持锁死锁 OK")
+    finally:
+        st.close()
+
+
+def test_rest_only_returns_to_setup():
+    """「只休息」：休息到点回 idle，并留下 open_setup 让窗口回到时间界面。"""
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p12.db"))
+    try:
+        svc, clock, wall, _, _, _ = make_service(st)
+        svc.start_focus(focus_minutes=5, break_minutes=3)
+        clock.advance(5 * 60)
+        wall.advance(5 * 60)
+        svc.tick()
+        assert svc.status()["state"] == "focus_done"
+
+        svc.start_break(chain=False)
+        s = svc.status()
+        assert s["state"] == "break", s
+        assert s["chain_next"] is False
+
+        clock.advance(3 * 60)
+        wall.advance(3 * 60)
+        svc.tick()
+        s = svc.status()
+        assert s["state"] == "idle", s
+        assert s["open_setup"] is True, "休息结束应唤起时间界面"
+        assert st.get_setting("pomodoro.open_setup") == "1"
+        print("只休息：到点回时间界面 OK")
+    finally:
+        st.close()
+
+
 def test_set_config_updates_memory():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p11.db"))
     try:
@@ -348,6 +412,8 @@ if __name__ == "__main__":
     test_complete_and_report()
     test_chain_break_then_auto_focus()
     test_next_round_skips_break()
+    test_guards_do_not_deadlock()
+    test_rest_only_returns_to_setup()
     test_set_config_updates_memory()
     test_abort_keeps_partial_report()
     test_break_zero_goes_idle()

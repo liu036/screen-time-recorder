@@ -67,6 +67,16 @@ def all_texts(widget):
     return out
 
 
+def find_label(widget, text):
+    for c in widget.winfo_children():
+        if isinstance(c, tk.Label) and c.cget("text") == text:
+            return c
+        hit = find_label(c, text)
+        if hit is not None:
+            return hit
+    return None
+
+
 def find_focus_btn(ui):
     for row in rows(ui):
         for w in labels(row):
@@ -135,12 +145,28 @@ def main():
     btn.event_generate("<Button-1>")
     pump(ui, 10)
     s = svc.status()
+    assert s["state"] == "idle", "行内「专注」只应唤起设置，不应直接开始"
+    assert ui._pomo_setup_open and ui.pomo_area.winfo_ismapped()
+    assert ui._pomo_todo and ui._pomo_todo["id"] == expect_id
+    texts = all_texts(ui.pomo_area)
+    assert any("为「" in t for t in texts), texts
+    ui.root.update()
+    x, y = ui.root.winfo_rootx(), ui.root.winfo_rooty()
+    w, h = ui.root.winfo_width(), ui.root.winfo_height()
+    shot("_pomo_setup.png", (x, y, x + w, y + h))
+    print("点「专注」→ 唤起时长设置（未开始）OK")
+
+    start = find_label(ui.pomo_area, "开始专注")
+    assert start is not None, all_texts(ui.pomo_area)
+    start.event_generate("<Button-1>")
+    pump(ui, 10)
+    s = svc.status()
     assert s["state"] == "focus", s
     assert s["todo_id"] == expect_id, s
     assert s["title"] == expect_title, s
     assert ui._row_pomo_lbl is not None, "专注中的行应显示倒计时"
     assert ":" in ui._row_pomo_lbl.cget("text"), ui._row_pomo_lbl.cget("text")
-    print("点「专注」→ 绑定待办并开始 / 行内倒计时 OK")
+    print("确认开始 → 绑定待办 / 行内倒计时 OK")
 
     # 把时间推到结束
     clock.advance(25 * 60)
@@ -157,9 +183,10 @@ def main():
                 texts.extend([x.cget("text") for x in c.winfo_children()
                               if isinstance(x, tk.Label)])
     joined = " | ".join(texts)
-    assert "休息 5 分 → 继续" in joined, joined
-    assert "直接下一轮" in joined, joined
-    print("结束面板：休息并继续 / 直接下一轮 / 结束 OK")
+    assert "休息 5 分后继续" in joined, joined
+    assert "只休息 5 分" in joined, joined
+    assert "结束" in joined, joined
+    print("结束面板：休息后继续 / 只休息 / 结束 OK")
 
     # 截图 todo 窗口（含行内专注与结束面板）
     ui.root.update()
@@ -209,6 +236,31 @@ def main():
     left, top, right, bottom = work_area()
     shot("_pomo_popup_break.png", (right - 420, bottom - 240, right, bottom))
     proc.terminate()
+
+    # 专注中点另一条待办：确认后中断旧会话，并进入新任务的时长设置
+    other_row = None
+    for r in rows(ui):
+        texts_r = [w.cget("text") for w in labels(r)]
+        if expect_title not in texts_r and "专注" in texts_r:
+            other_row = r
+            break
+    assert other_row is not None, "找不到另一条待办"
+
+    import screen_time_recorder.pomodoro_panel as panel
+    old_ask = panel.messagebox.askyesno
+    panel.messagebox.askyesno = lambda *a, **k: True
+    try:
+        [w for w in labels(other_row)
+         if w.cget("text") == "专注"][0].event_generate("<Button-1>")
+        pump(ui, 10)
+    finally:
+        panel.messagebox.askyesno = old_ask
+
+    s = svc.status()
+    assert s["state"] == "idle", s
+    assert ui._pomo_todo and ui._pomo_todo["id"] != expect_id, ui._pomo_todo
+    assert ui._pomo_setup_open
+    print("专注中切换任务 → 中断旧会话并进入新设置 OK")
 
     svc.stop("test")
     ui.on_close()

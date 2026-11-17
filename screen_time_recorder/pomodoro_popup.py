@@ -224,10 +224,10 @@ class Popup:
             return b
 
         if bm > 0:
-            mkbtn("休息 %d 分，然后继续" % bm, self._rest_and_next, True)
+            mkbtn("休息 %d 分后继续" % bm, self._rest_and_next, True)
+            mkbtn("只休息 %d 分" % bm, self._rest_only)
         else:
             mkbtn("开始下一轮", self._next_round, True)
-        mkbtn("直接下一轮", self._next_round)
         mkbtn("结束", self._finish)
 
     def _build_break_done(self, card):
@@ -261,6 +261,10 @@ class Popup:
 
     def _rest_and_next(self):
         self._act("/api/pomodoro/start-break", {"chain": True})
+
+    def _rest_only(self):
+        """只休息：休息到点回时间界面，不自动开下一轮。"""
+        self._act("/api/pomodoro/start-break", {})
 
     def _next_round(self):
         self._act("/api/pomodoro/next")

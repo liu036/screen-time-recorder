@@ -16,8 +16,8 @@ from tkinter import messagebox
 
 from . import config
 from .pomodoro import fmt_mmss
-from .todo_theme import (ACCENT, BG, CARD, DANGER, FAINT, F_BODY, F_SMALL,
-                         INK, MUTED)
+from .todo_theme import (ACCENT, ACCENT_DARK, BG, CARD, DANGER, FAINT,
+                         F_BODY, F_SMALL, INK, MUTED)
 from .todo_utils import api, ellipsize
 
 
@@ -92,7 +92,8 @@ class PomodoroPanelMixin:
         state = st.get("state", "idle")
         setup = self._pomo_setup_open and state == "idle"
         sig = (state, setup, st.get("session_id"), st.get("title"),
-               st.get("break_minutes"), st.get("focus_minutes"))
+               st.get("break_minutes"), st.get("focus_minutes"),
+               (getattr(self, "_pomo_todo", None) or {}).get("id"))
         if sig == self._pomo_sig:
             return
         self._pomo_sig = sig
@@ -166,8 +167,15 @@ class PomodoroPanelMixin:
                       config.POMODORO_DEFAULT_BREAK_MIN).grid(
             row=1, column=1, sticky="e", padx=(0, 10), pady=(2, 3))
 
-        tk.Label(pad, text="点列表右侧「专注」可直接绑定待办",
-                 font=("Microsoft YaHei UI", 8), fg=MUTED, bg=CARD,
+        todo = getattr(self, "_pomo_todo", None)
+        if todo:
+            hint = "为「%s」专注" % ellipsize(
+                todo.get("title") or "", self._f_small, 210)
+            hint_fg, hint_font = ACCENT_DARK, ("Microsoft YaHei UI", 8, "bold")
+        else:
+            hint = "点列表右侧「专注」可直接绑定待办"
+            hint_fg, hint_font = MUTED, ("Microsoft YaHei UI", 8)
+        tk.Label(pad, text=hint, font=hint_font, fg=hint_fg, bg=CARD,
                  anchor="w").grid(row=2, column=0, columnspan=2,
                                   sticky="w", padx=10)
         tk.Label(pad, text="步长 5 分钟 · 休息 0 = 只专注不休息",
@@ -296,16 +304,17 @@ class PomodoroPanelMixin:
 
         bm = int(st.get("break_minutes") or 0)
         if bm > 0:
-            mkbtn("休息 %d 分 → 继续" % bm,
+            # 三个选择：休息完自动继续 / 只休息（之后回时间界面）/ 结束
+            mkbtn("休息 %d 分后继续" % bm,
                   lambda: self._pomo_action("/api/pomodoro/start-break",
                                             {"chain": True}),
                   "#FFFFFF", ACCENT)
+            mkbtn("只休息 %d 分" % bm,
+                  lambda: self._pomo_action("/api/pomodoro/start-break"))
         else:
             mkbtn("开始下一轮",
                   lambda: self._pomo_action("/api/pomodoro/next"),
                   "#FFFFFF", ACCENT)
-        mkbtn("直接下一轮",
-              lambda: self._pomo_action("/api/pomodoro/next"))
         mkbtn("结束", lambda: self._pomo_action("/api/pomodoro/skip-break"))
         self._pomo_lbl = None
 
@@ -314,6 +323,8 @@ class PomodoroPanelMixin:
         st = self._pomo or {}
         if st.get("state", "idle") != "idle":
             return
+        # 从底部按钮打开 = 自由专注，清掉行内带过来的待办
+        self._pomo_todo = None
         self._pomo_setup_open = not self._pomo_setup_open
         self._pomo_sig = None
         self._render_pomo()
@@ -325,6 +336,7 @@ class PomodoroPanelMixin:
 
     def _close_pomo_setup(self):
         self._pomo_setup_open = False
+        self._pomo_todo = None
         self._pomo_sig = None
         self._render_pomo()
 
@@ -335,9 +347,13 @@ class PomodoroPanelMixin:
         bm = self._pomo_read(self._break_var, config.POMODORO_BREAK_MIN,
                              config.POMODORO_BREAK_MAX,
                              config.POMODORO_DEFAULT_BREAK_MIN)
+        body = {"focus_minutes": fm, "break_minutes": bm}
+        todo = getattr(self, "_pomo_todo", None)
+        if todo:
+            body["todo_id"] = todo["id"]     # 确认开始才真正绑定
         self._pomo_setup_open = False
-        self._pomo_action("/api/pomodoro/start",
-                          {"focus_minutes": fm, "break_minutes": bm})
+        self._pomo_todo = None
+        self._pomo_action("/api/pomodoro/start", body)
 
     def _pomo_remain_text(self):
         st = self._pomo or {}
@@ -346,7 +362,10 @@ class PomodoroPanelMixin:
         return fmt_mmss(max(0, remain))
 
     def _on_focus_click(self, item):
-        """行内「专注」：绑定该待办直接开始；已绑定的那行则展开控制面板。"""
+        """行内「专注」：先唤起时长设置，点「开始专注」才真正开始。
+
+        已绑定的那条正在专注时，再点是展开控制面板（暂停/结束）。
+        """
         st = self._pomo or {}
         state = st.get("state", "idle")
         if state in ("focus", "paused") and st.get("todo_id") == item["id"]:
@@ -357,15 +376,19 @@ class PomodoroPanelMixin:
                    or ("休息中" if state == "break" else "自由专注"))
             if not messagebox.askyesno(
                     "番茄钟",
-                    "正在「%s」，要中断并开始「%s」吗？"
+                    "正在「%s」。设置新专注会中断它，\n确定要换成「%s」吗？"
                     % (cur, item["title"]), parent=self.root):
                 return
-        cfg = st.get("config") or {}
-        self._pomo_action("/api/pomodoro/start", {
-            "todo_id": item["id"],
-            "focus_minutes": cfg.get("focus_minutes"),
-            "break_minutes": cfg.get("break_minutes"),
-        })
+            # 面板只在 idle 下显示设置态，所以确认后先把当前会话停掉。
+            # 用户已经明确同意中断，这里不算"偷偷开始"。
+            self._pomo_action("/api/pomodoro/stop", {"reason": "replaced"})
+            if (self._pomo or {}).get("state") != "idle":
+                return
+        # 进入设置态：待办挂到面板上，时长可调，确认后才发 start
+        self._pomo_todo = item
+        self._pomo_setup_open = True
+        self._pomo_sig = None
+        self._render_pomo()
 
     def _open_pomo_panel(self):
         self._pomo_setup_open = False

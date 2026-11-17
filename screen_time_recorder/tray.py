@@ -253,6 +253,9 @@ class TrayApp:
                 self.pomodoro.next_round()
         elif cmd == 107:
             self.open_todo_window(focus=False)
+        elif cmd == 108:
+            if self.pomodoro:
+                self.pomodoro.start_break(chain=False)
 
     def _append_pomodoro_menu(self, menu):
         """两层子菜单：空闲给开始入口，运行中只给暂停/结束。"""
@@ -277,10 +280,16 @@ class TrayApp:
             win32gui.AppendMenu(sub, win32con.MF_STRING, 101,
                                 "自定义时长与休息…")
         elif state == "focus_done":
-            win32gui.AppendMenu(
-                sub, win32con.MF_STRING, 104,
-                "休息 %d 分钟，然后继续" % st.get("break_minutes", 0))
-            win32gui.AppendMenu(sub, win32con.MF_STRING, 106, "直接下一轮")
+            bm = int(st.get("break_minutes") or 0)
+            if bm > 0:
+                win32gui.AppendMenu(
+                    sub, win32con.MF_STRING, 104,
+                    "休息 %d 分钟，然后继续" % bm)
+                win32gui.AppendMenu(sub, win32con.MF_STRING, 108,
+                                    "只休息 %d 分钟" % bm)
+            else:
+                win32gui.AppendMenu(sub, win32con.MF_STRING, 106,
+                                    "开始下一轮")
             win32gui.AppendMenu(sub, win32con.MF_STRING, 105, "结束")
         elif state == "paused":
             win32gui.AppendMenu(sub, win32con.MF_STRING, 102, "继续")
