@@ -16,6 +16,7 @@ import threading
 import time
 
 from . import config
+from .focus_report import build_report
 
 
 def _clamp(v, lo, hi):
@@ -34,17 +35,6 @@ def fmt_mmss(ms):
     if h:
         return "%d:%02d:%02d" % (h, m, sec)
     return "%02d:%02d" % (m, sec)
-
-
-def _human(ms):
-    s = int(ms // 1000)
-    if s < 60:
-        return "%d 秒" % s
-    m, sec = divmod(s, 60)
-    if m < 60:
-        return "%d 分 %d 秒" % (m, sec) if sec else "%d 分钟" % m
-    h, m = divmod(m, 60)
-    return "%d 小时 %d 分" % (h, m) if m else "%d 小时" % h
 
 
 class PomodoroService(threading.Thread):
@@ -485,7 +475,7 @@ class PomodoroService(threading.Thread):
         focused = min(self._elapsed_ms_locked(), planned)
         start_ts = int(self._session["started_ts"])
         end_ts = self.wall_ms()      # 用实际结束时间，报告覆盖完整跨度
-        report = self._build_report(start_ts, end_ts, focused)
+        report = build_report(self.storage, start_ts, end_ts, focused)
         try:
             self.storage.finish_pomodoro_session(
                 self._session["id"], end_ts, focused,
@@ -558,7 +548,7 @@ class PomodoroService(threading.Thread):
         end_ts = self.wall_ms()
         report = {}
         if kind == "focus" and elapsed >= 60000:
-            report = self._build_report(start_ts, end_ts, elapsed)
+            report = build_report(self.storage, start_ts, end_ts, elapsed)
         try:
             self.storage.finish_pomodoro_session(
                 self._session["id"], end_ts, elapsed,
@@ -571,49 +561,6 @@ class PomodoroService(threading.Thread):
         self._session = None
         self._done_since_mono = None
         self._last_state = "idle"
-
-    def _build_report(self, start_ts, end_ts, focused_ms):
-        """用采集数据算这段时间的真实分布（核心差异化）。"""
-        out = {"start_ts": start_ts, "end_ts": end_ts,
-               "focused_ms": int(focused_ms), "rate": None,
-               "by_cat": [], "top_apps": [], "top_content": [],
-               "work_ms": 0, "fun_ms": 0, "total_ms": 0, "text": ""}
-        try:
-            from .classifier import ActivityService
-            svc = ActivityService(self.storage)
-            by_app, by_cat, by_content = svc.durations(start_ts, end_ts)
-        except Exception as e:
-            print("[pomodoro] 生成报告失败: %s" % e)
-            return out
-
-        total = sum(by_app.values())
-        work = by_cat.get("工作", 0)
-        fun = by_cat.get("娱乐", 0)
-        out["total_ms"] = total
-        out["work_ms"] = work
-        out["fun_ms"] = fun
-        # 采集覆盖不足一半时不评判专注率：刚启动/采集暂停时 total 会很小，
-        # 直接算会得出误导性的 0%。
-        if focused_ms > 0 and total >= focused_ms * 0.5:
-            out["rate"] = max(0.0, min(1.0, work / float(focused_ms)))
-        out["by_cat"] = sorted(by_cat.items(), key=lambda x: -x[1])[:6]
-        out["top_apps"] = sorted(by_app.items(), key=lambda x: -x[1])[:5]
-        out["top_content"] = [
-            {"app": a, "title": t, "ms": d}
-            for (a, t), d in sorted(by_content.items(),
-                                    key=lambda x: -x[1])[:3]]
-
-        rate = out["rate"]
-        if rate is None:
-            out["text"] = "这段时间没有可用的采集数据。"
-        elif rate >= 0.8:
-            out["text"] = "这次很扎实，几乎全程在工作。"
-        elif rate >= 0.5:
-            out["text"] = "基本在状态，有 %s 分给了别的。" % _human(fun or 0)
-        else:
-            out["text"] = "这次注意力比较散，%s 在娱乐/浏览上。" % _human(
-                max(0, total - work))
-        return out
 
     def _recover(self):
         """启动时处理上次未结束的会话。"""
