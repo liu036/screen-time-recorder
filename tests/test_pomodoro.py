@@ -38,20 +38,18 @@ class FakeWall:
         self.ms += int(sec * 1000)
 
 
-def make_service(st, lock_val=None, idle_val=None):
+def make_service(st, lock_val=None):
     clock, wall = FakeClock(), FakeWall()
     notes = []
     popups = []
     lock = lock_val if lock_val is not None else {"v": 0}
-    idle = idle_val if idle_val is not None else {"v": 0}
     svc = PomodoroService(
         st, notifier=lambda t, b: notes.append((t, b)),
         lock_getter=lambda: lock["v"],
-        idle_getter=lambda: idle["v"],
         popup_cb=lambda kind, t, b: popups.append((kind, t, b)),
         clock=clock, wall_ms=wall, tick_ms=1000)
     svc.test_popups = popups
-    return svc, clock, wall, notes, lock, idle
+    return svc, clock, wall, notes, lock, None
 
 
 def seed_events(st, base_ms):
@@ -123,15 +121,21 @@ def test_pause_and_resume():
         st.close()
 
 
-def test_auto_pause_on_lock_and_idle():
+def test_auto_pause_on_lock_only():
     st = Storage(os.path.join(tempfile.mkdtemp(), "p3.db"))
     try:
         lock = {"v": 0}
-        idle = {"v": 0}
-        svc, clock, wall, notes, _, _ = make_service(st, lock, idle)
-        svc.start_focus(focus_minutes=25, break_minutes=5)
-        clock.advance(11)       # 过启动宽限期（不因历史空闲立刻暂停）
+        svc, clock, wall, notes, _, _ = make_service(st, lock)
+        svc.start_focus(focus_minutes=60, break_minutes=5)
+        clock.advance(11)       # 过启动宽限期
         wall.advance(11)
+
+        # 连续 50 分钟不碰键鼠不应触发暂停（已取消空闲检测）
+        for _ in range(10):
+            clock.advance(300)
+            wall.advance(300)
+            svc.tick()
+        assert svc.status()["state"] == "focus", "空闲不应自动暂停"
 
         lock["v"] = 2
         svc.tick()
@@ -140,21 +144,14 @@ def test_auto_pause_on_lock_and_idle():
 
         lock["v"] = 0
         svc.tick()
-        assert svc.status()["state"] == "paused", "恢复活跃不应自动继续"
+        assert svc.status()["state"] == "paused", "解锁不应自动继续"
         assert any(n[0] == "已自动暂停" for n in notes)
 
         clock.advance(180)          # 暂停期间真实时间流逝
         wall.advance(180)
         svc.resume()
         assert svc.status()["paused_ms"] == 180000, svc.status()
-        clock.advance(11)           # 过恢复宽限期
-        wall.advance(11)
-
-        idle["v"] = 300000
-        svc.tick()
-        assert svc.status()["state"] == "paused"
-        assert "离开" in svc.status()["paused_reason"]
-        print("锁屏 / 离开自动暂停 / 不自动继续 OK")
+        print("锁屏自动暂停 / 空闲不暂停 / 不自动继续 OK")
     finally:
         st.close()
 
@@ -341,7 +338,7 @@ def test_recover_running_and_timeout():
 if __name__ == "__main__":
     test_start_and_countdown()
     test_pause_and_resume()
-    test_auto_pause_on_lock_and_idle()
+    test_auto_pause_on_lock_only()
     test_complete_and_report()
     test_chain_break_then_auto_focus()
     test_next_round_skips_break()

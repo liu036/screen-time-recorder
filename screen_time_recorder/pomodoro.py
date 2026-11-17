@@ -6,7 +6,8 @@
 - 到点不自动休息：进入 focus_done，等用户选择（超时才回空闲）；
 - 连续番茄（chain）：专注结束后选「休息并继续」→ 休息到点立即自动开下一轮，
   继承上一轮的待办、标题与时长，形成 专注→休息→专注 的闭环；
-- 锁屏 / 连续 5 分钟无输入 → 自动暂停；恢复活跃只提示、不自动继续；
+- 只按锁屏自动暂停：不再检测键鼠空闲（看视频、思考、开会都会被误判），
+  解锁后只提示、不自动继续；
 - 结束时用该时间区间向 ActivityService 要真实应用/内容分布，生成专注报告；
 - 会话状态实时落库，进程崩溃后可恢复或标记 interrupted。
 """
@@ -50,14 +51,13 @@ class PomodoroService(threading.Thread):
     """focus / paused / focus_done / break / idle 五态。"""
 
     def __init__(self, storage, notifier=None, state_cb=None,
-                 lock_getter=None, idle_getter=None, popup_cb=None,
+                 lock_getter=None, popup_cb=None,
                  clock=None, wall_ms=None, tick_ms=None):
         """
         storage:      Storage
         notifier:     callable(title, body) -> bool（托盘气泡）
         state_cb:     callable(status_dict)，用于刷新托盘 tooltip
         lock_getter:  callable() -> int（2 = 锁屏）
-        idle_getter:  callable() -> int（毫秒）
         popup_cb:     callable(kind, title, body)，拉起置顶提醒小窗
         clock:        callable() -> 秒，默认 time.monotonic（测试可注入）
         wall_ms:      callable() -> 毫秒，默认 time.time
@@ -68,7 +68,6 @@ class PomodoroService(threading.Thread):
         self.popup_cb = popup_cb
         self.state_cb = state_cb
         self.lock_getter = lock_getter or (lambda: 0)
-        self.idle_getter = idle_getter or (lambda: 0)
         self.clock = clock or time.monotonic
         self.wall_ms = wall_ms or (lambda: int(time.time() * 1000))
         self.interval = (tick_ms or config.POMODORO_TICK_MS) / 1000.0
@@ -128,7 +127,7 @@ class PomodoroService(threading.Thread):
 
         with self._lock:
             if self._state == "focus":
-                # 1) 锁屏 / 长时间离开 → 自动暂停
+                # 1) 锁屏 → 自动暂停（不再检测键鼠空闲）
                 reason = self._auto_pause_reason()
                 if reason:
                     self._pause_locked(reason)
@@ -142,7 +141,7 @@ class PomodoroService(threading.Thread):
                     if not self._paused_hint_sent:
                         self._paused_hint_sent = True
                         notify = ("已自动暂停",
-                                  "你离开了一会儿，番茄钟已暂停。点托盘「番茄钟 · 继续」接上。")
+                                  "屏幕已锁定，番茄钟暂停。解锁后点托盘「番茄钟 · 继续」接上。")
                     changed = True   # 让 tooltip 更新提示
             elif self._state == "focus_done":
                 if (self._done_since_mono is not None and
@@ -443,18 +442,13 @@ class PomodoroService(threading.Thread):
         return max(0, total)
 
     def _auto_pause_reason(self):
-        # 刚开始/刚恢复时不要因为"之前的空闲"立刻暂停
+        """只有锁屏算"人不在"。键鼠空闲不作为依据：看视频、读文档、思考时
+        长时间不碰键鼠是常态，按空闲暂停会反复打断。"""
         if self.clock() < self._grace_until_mono:
             return ""
         try:
             if int(self.lock_getter() or 0) == 2:
                 return "锁屏"
-        except Exception:
-            pass
-        try:
-            idle = int(self.idle_getter() or 0)
-            if idle >= config.POMODORO_IDLE_LIMIT_MS:
-                return "离开 %d 分钟" % (idle // 60000)
         except Exception:
             pass
         return ""
@@ -463,7 +457,7 @@ class PomodoroService(threading.Thread):
         self._state = "paused"
         self._pause_started_mono = self.clock()
         self._pause_reason = reason or "手动"
-        self._paused_by_auto = reason in ("锁屏",) or reason.startswith("离开")
+        self._paused_by_auto = reason == "锁屏"
         self._paused_hint_sent = False
         self._interruptions += 1
         self._persist_progress_locked()

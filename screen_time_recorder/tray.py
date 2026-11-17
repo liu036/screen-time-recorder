@@ -26,7 +26,6 @@ from . import cli
 from . import config
 from .reminder import ReminderService
 from .pomodoro import PomodoroService, fmt_mmss
-from .collector import get_idle_ms
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NIN_BALLOONUSERCLICK = 0x0405  # 点击气泡正文
@@ -509,7 +508,6 @@ class TrayApp:
                 self.daemon.storage, self.notify,
                 state_cb=self._on_pomodoro_state,
                 lock_getter=lambda: self.daemon.collector.lock_state,
-                idle_getter=get_idle_ms,
                 popup_cb=self._popup)
         except Exception as e:
             print(f"[tray] 番茄钟服务初始化失败: {e}")
