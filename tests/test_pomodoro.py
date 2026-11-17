@@ -274,6 +274,8 @@ def test_guards_do_not_deadlock():
         call("resume(idle)", lambda: svc.resume())
         call("start_break(idle)", lambda: svc.start_break())
         call("next_round(idle)", lambda: svc.next_round())
+        s = call("start_break(idle)", lambda: svc.start_break())
+        assert s["state"] == "idle", "空闲时不应凭空开始休息"
 
         svc.start_focus(5, 5)
         call("start_break(focus)", lambda: svc.start_break())

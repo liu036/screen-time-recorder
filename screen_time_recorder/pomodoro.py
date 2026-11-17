@@ -274,9 +274,13 @@ class PomodoroService(threading.Thread):
         return self.status()
 
     def start_break(self, chain=False):
-        """开始休息。chain=True 时休息到点自动开始下一轮专注。"""
+        """开始休息。chain=True 时休息到点自动开始下一轮专注。
+
+        只允许从 focus_done 进入：idle 状态下"休息"没有意义，
+        会凭空产生一条只有休息的会话、把状态卡在 break。
+        """
         with self._lock:
-            if self._state not in ("focus_done", "idle"):
+            if self._state != "focus_done":
                 return self._status_locked()
             self._chain_next = bool(chain)
             if chain and not self._next_round:
