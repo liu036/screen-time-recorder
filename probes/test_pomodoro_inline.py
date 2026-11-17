@@ -58,6 +58,15 @@ def labels(row):
     return [w for w in row.winfo_children() if isinstance(w, tk.Label)]
 
 
+def all_texts(widget):
+    out = []
+    for c in widget.winfo_children():
+        if isinstance(c, tk.Label):
+            out.append(c.cget("text"))
+        out.extend(all_texts(c))
+    return out
+
+
 def find_focus_btn(ui):
     for row in rows(ui):
         for w in labels(row):
@@ -178,6 +187,12 @@ def main():
     # 点「休息并继续」→ 休息 → 自动下一轮
     svc.start_break(chain=True)
     assert svc.status()["state"] == "break"
+    ui._poll_pomo()
+    pump(ui, 8)
+    texts = all_texts(ui.pomo_area)
+    assert any("休息中" in t for t in texts), texts
+    print("休息态面板渲染 OK")
+
     clock.advance(5 * 60)
     svc.tick()
     s = svc.status()

@@ -1016,8 +1016,11 @@ class TodoApp:
         for w in self.inner.winfo_children():
             w.destroy()
         self._rows = []
+        # 注意：控件的 pady 只能是一个像素值，元组是 pack() 的参数。
+        # 写成 Label(..., pady=(28, 4)) 会被 Tcl 解析成 "28 4" 直接抛 TclError，
+        # 导致"主进程没起"这个本该兜底的场景反而让窗口崩溃。
         tk.Label(self.inner, text="连接不上记录器",
-                 font=F_TITLE_HI, fg=DANGER, bg=BG, pady=(28, 4)).pack()
+                 font=F_TITLE_HI, fg=DANGER, bg=BG).pack(pady=(28, 4))
         tk.Label(self.inner, text="请先启动屏幕时间记录器（托盘图标）。\n%s" % err,
                  font=F_SMALL, fg=MUTED, bg=BG, justify="center").pack()
         self.status.configure(text="离线，每 3 秒重试", fg=DANGER)
