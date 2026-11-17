@@ -237,35 +237,43 @@ class Storage:
             self._flush()
 
     def _flush(self):
+        """把缓冲写入 SQLite。
+
+        整个"取缓冲 + 写连接"必须在同一把锁里：sqlite3 的 Connection 在
+        check_same_thread=False 下被 flush 线程、Flask 线程、close() 共用，
+        锁外写会和 close()/其他写操作交错，出现 "closed database" 或
+        "cannot start a transaction within a transaction"。
+        """
         with self._lock:
+            if self._conn is None:
+                return
             evs = self._event_buf
-            self._event_buf = []
             snaps = self._snap_buf
+            self._event_buf = []
             self._snap_buf = []
-        if not evs and not snaps:
-            return
-        try:
-            with self._conn:
-                if evs:
-                    self._conn.executemany(
-                        "INSERT INTO events "
-                        "(ts,event_type,hwnd,app_id,window_title,rect,cls,idle_ms,is_afk,raw,content_title) "
-                        "VALUES (:ts,:event_type,:hwnd,:app_id,:window_title,:rect,:cls,"
-                        ":idle_ms,:is_afk,:raw,:content_title)",
-                        evs,
-                    )
-                if snaps:
-                    self._conn.executemany(
-                        "INSERT INTO visibility_snapshot "
-                        "(ts,hwnd,app_id,rect,visibility,cover) "
-                        "VALUES (:ts,:hwnd,:app_id,:rect,:visibility,:cover)",
-                        snaps,
-                    )
-        except Exception as e:  # 写失败放回缓冲，下次重试
-            with self._lock:
+            if not evs and not snaps:
+                return
+            try:
+                with self._conn:
+                    if evs:
+                        self._conn.executemany(
+                            "INSERT INTO events "
+                            "(ts,event_type,hwnd,app_id,window_title,rect,cls,idle_ms,is_afk,raw,content_title) "
+                            "VALUES (:ts,:event_type,:hwnd,:app_id,:window_title,:rect,:cls,"
+                            ":idle_ms,:is_afk,:raw,:content_title)",
+                            evs,
+                        )
+                    if snaps:
+                        self._conn.executemany(
+                            "INSERT INTO visibility_snapshot "
+                            "(ts,hwnd,app_id,rect,visibility,cover) "
+                            "VALUES (:ts,:hwnd,:app_id,:rect,:visibility,:cover)",
+                            snaps,
+                        )
+            except Exception as e:  # 写失败放回缓冲，下次重试
                 self._event_buf = evs + self._event_buf
                 self._snap_buf = snaps + self._snap_buf
-            print(f"[storage] flush error: {e}")
+                print(f"[storage] flush error: {e}")
 
     # ---------- 查询（供 classifier / CLI 使用）----------
     def get_app(self, app_id):
@@ -651,9 +659,11 @@ class Storage:
         self._closed = True
         self._stop.set()
         self._flush()
-        if self._conn:
+        # 收尾也要拿锁：避免 flush 线程恰好还在写时把连接关掉
+        with self._lock:
+            conn, self._conn = self._conn, None
+        if conn:
             try:
-                self._conn.close()
+                conn.close()
             except Exception:
                 pass
-        self._conn = None

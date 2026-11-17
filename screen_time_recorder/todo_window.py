@@ -14,6 +14,7 @@
 import ctypes
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -53,6 +54,16 @@ F_SMALL = ("Microsoft YaHei UI", 8)
 F_BODY = ("Microsoft YaHei UI", 9)
 
 _mutex_handle = None
+
+
+def _log(msg):
+    """pythonw 下 sys.stdout 是 None，print 会抛异常；异常路径单独落一份日志。"""
+    try:
+        path = os.path.join(os.path.dirname(config.DB_PATH), "todo.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("[%s] %s\n" % (datetime.now().strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
 
 
 # ---------- HTTP ----------
@@ -176,6 +187,10 @@ class TodoApp:
         self._row_pomo_lbl = None      # 列表行内的倒计时（绑定待办时）
         self._row_pomo_id = None
         self._pomo_prev_key = None     # 番茄状态变化 → 刷新行内按钮
+        # Tk 不是线程安全的：后台线程只往队列里放回调，由主线程定时取出执行
+        self._ui_queue = queue.Queue()
+        self._queue_alive = True
+        self.root.after(50, self._drain_ui_queue)
         # 字体对象缓存：每次渲染新建 tkfont.Font 会不断累积在 Tk 解释器里
         self._f_title = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self._f_title_hi = tkfont.Font(family="Microsoft YaHei UI", size=10,
@@ -751,14 +766,30 @@ class TodoApp:
             except Exception as ex:
                 result = data = summary = None
                 err = ex
-            try:
-                self.root.after(0, lambda: self._after_write(
+            if self._queue_alive:
+                self._ui_queue.put(lambda: self._after_write(
                     result, data, summary, err, on_success, seq, flt))
-            except Exception:
-                pass
 
         threading.Thread(target=worker, daemon=True,
                          name="todo-write").start()
+
+    def _drain_ui_queue(self):
+        """主线程消费后台线程投递的回调（替代跨线程 root.after）。"""
+        if not self._queue_alive:
+            return
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                _log("UI 回调失败: %s" % e)
+        try:
+            self.root.after(50, self._drain_ui_queue)
+        except Exception:
+            pass
 
     def _after_write(self, result, data, summary, err,
                      on_success=None, seq=None, flt=None):
@@ -1248,6 +1279,7 @@ class TodoApp:
 
     def on_close(self):
         self._save_geometry()
+        self._queue_alive = False
         for attr in ("_after_id", "_pomo_after", "_pomo_tick_after"):
             aid = getattr(self, attr, None)
             if aid:

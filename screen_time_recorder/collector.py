@@ -17,7 +17,6 @@ import threading
 import time
 from ctypes import wintypes
 
-import win32con
 import win32gui
 import win32process
 import psutil
@@ -149,6 +148,7 @@ class Collector:
         self._proc_ref = None  # 保持回调引用，防 GC
         self.hook_fg = None
         self.hook_name = None
+        self._threads = ()     # 当前运行的 hook / 轮询线程
         # 当前前台追踪（供内容级抓取线程判断"是否抖音前台"）
         self._fg_lock = threading.Lock()
         self._fg_proc = None
@@ -336,10 +336,18 @@ class Collector:
             time.sleep(config.HOOK_POLL_MS / 1000.0)
 
     def start(self):
-        self.stop.clear()  # 支持暂停后恢复（stop_now 置位后需清除才能重启）
+        # 先等上一批线程真正退出，再 clear()。否则 stop.clear() 会把还在
+        # 退场路上的旧线程一起"复活"，出现多个 hook/轮询线程并行、
+        # 同一次前台切换被重复记录的问题（反复点暂停/继续时触发）。
+        if any(t.is_alive() for t in self._threads):
+            self.stop.set()
+            for t in self._threads:
+                t.join(timeout=1.5)
+        self.stop.clear()
         t = threading.Thread(target=self._hook_thread, daemon=True)
-        t.start()
         p = threading.Thread(target=self._poll_thread, daemon=True)
+        self._threads = (t, p)
+        t.start()
         p.start()
         # 抖音内容级抓取线程（仅抖音前台时按节流间隔抓）
         self._content_fetcher = ContentFetcher(self)
@@ -376,8 +384,8 @@ class ContentFetcher(threading.Thread):
 
     def run(self):
         while not self.stop.is_set():
-            time.sleep(config.CONTENT_FETCH_INTERVAL_MS / 1000.0)
-            if self.stop.is_set():
+            # wait 而不是 sleep：暂停时立即唤醒退出，不然旧线程会拖着 5 秒
+            if self.stop.wait(config.CONTENT_FETCH_INTERVAL_MS / 1000.0):
                 break
             try:
                 self._tick()

@@ -25,6 +25,7 @@ class SnapshotCollector:
         self.storage = storage
         self.stop = threading.Event()
         self.last_sig = None
+        self._thread = None
 
     def _screen(self):
         w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
@@ -109,5 +110,10 @@ class SnapshotCollector:
             time.sleep(config.SNAPSHOT_INTERVAL_MS / 1000.0)
 
     def start(self):
-        self.stop.clear()  # 支持暂停后恢复
-        threading.Thread(target=self._loop, daemon=True).start()
+        # 同 Collector：旧线程还在跑时先等它退出，避免两个快照线程并行
+        if self._thread is not None and self._thread.is_alive():
+            self.stop.set()
+            self._thread.join(timeout=2.0)
+        self.stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
