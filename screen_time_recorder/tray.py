@@ -517,7 +517,8 @@ class TrayApp:
                                              pomodoro=self.pomodoro)
             print(f"[tray] 仪表盘: {self._web_url}")
         except Exception as e:
-            print(f"[tray] 仪表盘启动失败: {e}")
+            print(f"[tray] 仪表盘启动失败（端口 8765 可能被占用，"
+                  f"待办窗口将无法连接）: {e}")
         try:
             self.hicon = win32gui.LoadImage(
                 0, self._ico_path, win32con.IMAGE_ICON, 0, 0,

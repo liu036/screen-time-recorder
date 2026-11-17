@@ -20,6 +20,23 @@ ASSETS_DIR = os.path.join(BASE, "assets")
 DEFAULT_PORT = 8765
 
 
+def _port_listening(port, timeout=0.3):
+    """端口上是否已有服务在监听。
+
+    Windows 的 SO_REUSEADDR 允许多个 socket 绑同一端口（不像 Unix 会失败），
+    所以 make_server 不会抛错，而是静默抢不到连接。必须主动连一下。
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def _valid_date(value):
     try:
         datetime.strptime(value, "%Y-%m-%d")
@@ -305,16 +322,30 @@ def _as_ms(value):
 
 
 def start_server(storage, port=DEFAULT_PORT, open_browser=False, pomodoro=None):
-    """后台线程启动服务，返回访问 URL。"""
+    """后台线程启动服务，返回访问 URL。
+
+    绑定放在调用线程里同步完成：端口被占用时立刻抛 OSError。
+    之前用 app.run() 在子线程里 bind，失败只会在后台线程里静默退出，
+    表现为托盘一切正常、但仪表盘和待办窗口全部连不上（极难排查）。
+    """
     import logging
+    from werkzeug.serving import make_server
+
     # 关掉 werkzeug 的每条请求日志：否则会灌满 tray.log
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     app = create_app(storage, pomodoro=pomodoro)
     url = f"http://127.0.0.1:{port}/"
 
+    if _port_listening(port):
+        raise OSError(
+            "127.0.0.1:%d 已被占用（可能残留了旧的采集器进程）" % port)
+    server = make_server("127.0.0.1", port, app, threaded=True)
+
     def run():
-        app.run(host="127.0.0.1", port=port, debug=False,
-                use_reloader=False, threaded=True)
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
 
     threading.Thread(target=run, daemon=True, name="dashboard-web").start()
     if open_browser:
