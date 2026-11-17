@@ -555,6 +555,21 @@ class Storage:
                 "ORDER BY id DESC LIMIT 1").fetchone()
         return dict(zip(_POMO_COLS, row)) if row else None
 
+    def pomodoro_sessions_between(self, from_ts, to_ts, min_focused_ms=0):
+        """区间内的专注会话（跨界的也返回，由调用方裁剪到区间）。
+
+        只取已结束的 focus 会话：running 的 ended_ts 还没有值，
+        把它画进历史时间线会得到一个不断变长的块。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                _POMO_SELECT + " WHERE kind='focus' AND status!='running' "
+                "AND ended_ts>? AND started_ts<? AND focused_ms>=? "
+                "ORDER BY started_ts",
+                (int(from_ts), int(to_ts),
+                 int(min_focused_ms))).fetchall()
+        return [dict(zip(_POMO_COLS, r)) for r in rows]
+
     def update_pomodoro_session(self, session_id, **fields):
         unknown = set(fields) - _POMO_UPDATABLE
         if unknown:

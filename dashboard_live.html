@@ -439,6 +439,26 @@ function drawTimeline(){
       'letter-spacing':'.06em',class:'fade'},
       String(hh%24).padStart(2,'0')+':'+String(mm).padStart(2,'0'));
   }
+  // 专注时段高亮：单独一条「专注轨道」+ 对应色块的金色描边。
+  // 只垫浅色底不行——分类本身是暖色，金色底混在色带里看不出来。
+  const focusN=(d.focus||[]).length, trackY=TLY-24;
+  if(focusN){
+    txt(s,{x:4,y:trackY+3.5,'font-size':7.5,'font-weight':700,fill:'#B5851F',
+      'letter-spacing':'.06em',class:'fade'},'专注');
+  }
+  (d.focus||[]).forEach(f=>{
+    const x1=Math.max(TLX0,xOf(f.sf)), x2=Math.min(TLX1,xOf(f.ef));
+    if(x2-x1<1) return;
+    el(s,'rect',{x:x1,y:trackY-3,width:Math.max(4,x2-x1),height:6,rx:3,
+      fill:'#D4A017',opacity:.92,class:'fade fband','pointer-events':'none'});
+    el(s,'circle',{cx:x1,cy:trackY,r:2.6,fill:'#B5851F',class:'fade',
+      'pointer-events':'none'});
+    el(s,'rect',{x:x1-1.5,y:TLY-4,width:(x2-x1)+3,height:TLH+8,rx:9,
+      fill:'none',stroke:'#D4A017','stroke-width':1.8,
+      opacity:.55+.35*Math.max(0,Math.min(1,f.ratio||0)),
+      class:'fade','pointer-events':'none'});
+  });
+
   TLSEGS.forEach((t,i)=>{
     const x=xOf(t.sf), w=Math.max(1.6,(TLX1-TLX0)*(t.ef-t.sf)/span);
     const a={x,y:TLY,width:w,height:TLH,rx:Math.min(8,TLH/2,w/2),
@@ -473,9 +493,17 @@ function tlHit(x){
   }
   return -1;
 }
+function focusAt(f){
+  const d=DATA.data[TLV.day||CUR]||{};
+  for(const x of (d.focus||[])){
+    if(f>=x.sf && f<=x.ef) return x;
+  }
+  return null;
+}
 function showTip(t,cx,cy){
   const card=document.getElementById('timelineCard'), cr=card.getBoundingClientRect();
   const shade=(catShades(TLV.day)[t.cat]||FAINT);
+  const f=focusAt((t.sf+t.ef)/2);
   tlTip.innerHTML=
     `<div><b>${t.s}–${t.e}</b><span class="td">${t.dur}</span></div>`+
     `<div class="ta">${esc(t.app)}`+
@@ -484,6 +512,8 @@ function showTip(t,cx,cy){
       `<span style="margin-left:5px">${esc(t.cat||'未分类')}</span></div>`+
     (t.ct?`<div class="tc">${esc(t.ct)}</div>`
          :(t.title?`<div class="tc">${esc(t.title)}</div>`:''))+
+    (f?`<div class="tc" style="color:#8A6A20;font-weight:700;margin-top:3px">`+
+       `◆ 专注 ${esc(f.focused)} · ${esc(f.title)}</div>`:'')+
     `<div class="tc" style="opacity:.55;margin-top:4px">点击色块可改分类 / 删除</div>`;
   tlTip.style.display='block';
   const w=tlTip.offsetWidth, h=tlTip.offsetHeight;
@@ -664,9 +694,10 @@ function renderDay(day){
   const leg=document.getElementById('sTl');
   const firstT=d.timeline[0], lastT=d.timeline[d.timeline.length-1];
   const period=firstT?`活动时段 ${firstT.s}–${lastT.e} · `:'';
-  const edN=d.edited||0;
+  const edN=d.edited||0, focusN=(d.focus||[]).length;
   leg.innerHTML=period+'颜色 = 类别 · '+
     d.by_cat.map(([c])=>`<span class="dot" style="background:${catShades(day)[c]||FAINT}"></span>${esc(c)}`).join(' ')+
+    (focusN?`<span style="color:#8A6A20;font-weight:700"> · ◆ 金色轨 = 专注 ${focusN} 段</span>`:'')+
     `<span style="color:var(--faint)"> · 滚轮放大 · 右上角「还原」</span>`+
     (edN?`<span style="color:#8A6A20;font-weight:700"> · 已手动调整 ${edN} 段</span>`:'');
 

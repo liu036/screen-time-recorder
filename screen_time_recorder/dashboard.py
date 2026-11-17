@@ -68,12 +68,38 @@ def day_payload(storage, date):
                 "app": s["app_name"],
             })
 
+    # 番茄钟专注时段：前端用金色底把它们标成「高价值时间」。
+    # 跨度包含暂停，所以额外给 ratio，让暂停越久金色越淡。
+    focus = []
+    for s in storage.pomodoro_sessions_between(
+            from_ts, to_ts, config.MIN_ACTIVITY_DURATION_MS):
+        ended = int(s["ended_ts"] or 0)
+        if not ended:
+            continue
+        st = max(from_ts, int(s["started_ts"]))
+        en = min(to_ts, ended)
+        if en <= st:
+            continue
+        span = en - st
+        focused = min(int(s["focused_ms"] or 0), span)
+        focus.append({
+            "st": st, "en": en,
+            "sf": round(max(0.0, min(1.0, (st - day_start) / 86400000)), 5),
+            "ef": round(max(0.0, min(1.0, (en - day_start) / 86400000)), 5),
+            "title": s["title"] or "自由专注",
+            "dur": human(span),
+            "focused": human(focused),
+            "ratio": round(focused / float(span), 3) if span else 0.0,
+            "status": s["status"],
+        })
+
     return {
         "total": human(total), "total_ms": total,
         "by_app": sorted(by_app.items(), key=lambda x: -x[1])[:12],
         "by_cat": sorted(by_cat.items(), key=lambda x: -x[1]),
         "prod": prod, "hourly": hourly,
         "timeline": timeline, "content": contents,
+        "focus": focus,
         "edited": edited,
         "cat_options": config.CATEGORY_OPTIONS,
     }

@@ -14,6 +14,7 @@ probes/_todo_*.png
 probes/_shot*.png
 probes/_cdp_*.png
 probes/_pomo_*.png
+probes/_focus_*.png
 
 # ── Python ──
 __pycache__/

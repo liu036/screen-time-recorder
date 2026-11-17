@@ -41,6 +41,8 @@ def main():
           "timeline", len(p["timeline"]), "content", len(p["content"]),
           "week_rows", len(d["week_hourly"]))
     assert p["total_ms"] >= 0
+    assert "focus" in p, "day payload 应带专注时段"
+    print("   focus 段数:", len(p["focus"]))
 
     start = d["week_start"]
     status, body = get(base + "/api/week?start=" + start)
