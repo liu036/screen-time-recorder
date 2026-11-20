@@ -513,7 +513,7 @@ class TrayApp:
         # 番茄钟服务：先构造（web/托盘要引用），图标就绪后再启动线程
         try:
             self.pomodoro = PomodoroService(
-                self.daemon.storage, self.notify,
+                self.daemon.storage,
                 state_cb=self._on_pomodoro_state,
                 lock_getter=lambda: self.daemon.collector.lock_state,
                 popup_cb=self._popup)

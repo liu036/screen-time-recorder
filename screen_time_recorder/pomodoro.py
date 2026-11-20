@@ -41,7 +41,7 @@ def fmt_mmss(ms):
 class PomodoroService(threading.Thread):
     """focus / paused / focus_done / break / idle 五态。"""
 
-    def __init__(self, storage, notifier=None, state_cb=None,
+    def __init__(self, storage, state_cb=None,
                  lock_getter=None, popup_cb=None, sound_cb=None,
                  clock=None, wall_ms=None, tick_ms=None):
         """
@@ -55,7 +55,6 @@ class PomodoroService(threading.Thread):
         """
         super().__init__(daemon=True, name="pomodoro")
         self.storage = storage
-        self.notifier = notifier or (lambda t, b: False)
         self.popup_cb = popup_cb
         self.state_cb = state_cb
         self.lock_getter = lock_getter or (lambda: 0)
@@ -231,8 +230,6 @@ class PomodoroService(threading.Thread):
             self.storage.set_pomodoro_config(fm, bm)
         except Exception:
             pass
-        label = title or "自由专注"
-        self._notify("番茄钟开始", "专注 %d 分钟 · %s" % (fm, label))
         self._emit_state()
         return self.status()
 
@@ -607,12 +604,6 @@ class PomodoroService(threading.Thread):
                 pass
             print("[pomodoro] 会话 #%d 超时，标记 interrupted" % row["id"])
 
-    def _notify(self, title, body):
-        try:
-            self.notifier(title, body)
-        except Exception:
-            pass
-
     def _sound_enabled(self):
         try:
             return self.storage.get_setting("pomodoro.sound", "1") != "0"
@@ -620,11 +611,12 @@ class PomodoroService(threading.Thread):
             return True
 
     def _announce(self, title, body, kind=None):
-        """气泡必发；kind 非空时额外播放提示音 + 拉起置顶提醒小窗。
+        """番茄钟不再发托盘气泡：kind 非空时播放提示音 + 拉起置顶小窗。
 
-        只在这里发声：_notify 在“开始专注”时也会调用，挂上去会变成开始也响。
+        气泡和 Tk 小窗同时在右下角弹出，视觉上是两个重复的窗口；
+        现在只留可操作的那个（小窗），锁屏暂停等 kind=None 的提示
+        只体现在托盘 tooltip 上。
         """
-        self._notify(title, body)
         if not kind:
             return
         if self._sound_enabled():
