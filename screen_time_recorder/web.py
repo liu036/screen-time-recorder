@@ -303,10 +303,12 @@ def create_app(storage, pomodoro=None):
             # 开始仍用旧时长」；服务没起（CLI 场景）就直接写库。
             if pomodoro is not None:
                 cfg = pomodoro.set_config(body.get("focus_minutes"),
-                                          body.get("break_minutes"))
+                                          body.get("break_minutes"),
+                                          body.get("sound"))
             else:
                 cfg = storage.set_pomodoro_config(
-                    body.get("focus_minutes"), body.get("break_minutes"))
+                    body.get("focus_minutes"), body.get("break_minutes"),
+                    body.get("sound"))
         except (TypeError, ValueError):
             return jsonify({"error": "时长必须是整数"}), 400
         return jsonify(cfg)

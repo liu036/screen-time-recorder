@@ -18,7 +18,7 @@ from . import config
 from .pomodoro import fmt_mmss
 from .todo_theme import (ACCENT, ACCENT_DARK, BG, CARD, DANGER, FAINT,
                          F_BODY, F_SMALL, INK, MUTED)
-from .todo_utils import api, ellipsize
+from .todo_utils import api, ellipsize, log
 
 
 class PomodoroPanelMixin:
@@ -178,10 +178,17 @@ class PomodoroPanelMixin:
         tk.Label(pad, text=hint, font=hint_font, fg=hint_fg, bg=CARD,
                  anchor="w").grid(row=2, column=0, columnspan=2,
                                   sticky="w", padx=10)
-        tk.Label(pad, text="步长 5 分钟 · 休息 0 = 只专注不休息",
+        on = bool(cfg.get("sound", True))
+        self._sound_on = tk.BooleanVar(value=on)
+        self._sound_lbl = tk.Label(
+            pad, text="✓ 结束提示音" if on else "○ 结束提示音",
+            font=F_SMALL, fg=ACCENT_DARK if on else MUTED, bg=CARD,
+            cursor="hand2")
+        self._sound_lbl.grid(row=3, column=0, sticky="w", padx=(10, 0))
+        self._sound_lbl.bind("<Button-1>", lambda e: self._toggle_sound())
+        tk.Label(pad, text="步长 5 · 休息 0 = 不休息",
                  font=("Microsoft YaHei UI", 8), fg=FAINT, bg=CARD,
-                 anchor="w").grid(row=3, column=0, columnspan=2,
-                                  sticky="w", padx=10)
+                 anchor="e").grid(row=3, column=1, sticky="e", padx=(0, 10))
 
         bar = tk.Frame(pad, bg=CARD)
         bar.grid(row=4, column=0, columnspan=2, sticky="ew",
@@ -194,6 +201,23 @@ class PomodoroPanelMixin:
                           bg=CARD, padx=8, pady=4, cursor="hand2")
         cancel.pack(side="right")
         cancel.bind("<Button-1>", lambda e: self._close_pomo_setup())
+
+    def _toggle_sound(self):
+        """面板里直接开关提示音，立即写库（不用等开始下一次）。"""
+        on = not bool(self._sound_on.get())
+        self._sound_on.set(on)
+        try:
+            self._sound_lbl.configure(
+                text="✓ 结束提示音" if on else "○ 结束提示音",
+                fg=ACCENT_DARK if on else MUTED)
+            if self._pomo is not None:
+                self._pomo.setdefault("config", {})["sound"] = on
+        except Exception:
+            pass
+        try:
+            api("/api/settings/pomodoro", "PUT", {"sound": on})
+        except Exception as e:
+            log("保存提示音设置失败: %s" % e)
 
     def _stepper(self, parent, var, lo, hi, default):
         box = tk.Frame(parent, bg=CARD)

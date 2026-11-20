@@ -39,7 +39,7 @@ class FakeWall:
         self.ms += int(sec * 1000)
 
 
-def make_service(st, lock_val=None):
+def make_service(st, lock_val=None, sound_cb=None):
     clock, wall = FakeClock(), FakeWall()
     notes = []
     popups = []
@@ -48,6 +48,7 @@ def make_service(st, lock_val=None):
         st, notifier=lambda t, b: notes.append((t, b)),
         lock_getter=lambda: lock["v"],
         popup_cb=lambda kind, t, b: popups.append((kind, t, b)),
+        sound_cb=sound_cb or (lambda name: None),
         clock=clock, wall_ms=wall, tick_ms=1000)
     svc.test_popups = popups
     return svc, clock, wall, notes, lock, None
@@ -249,6 +250,55 @@ def test_next_round_skips_break():
         st.close()
 
 
+def test_sound_on_finish():
+    """结束才响：完成音/继续音各一次；中止不响；关掉开关不响。"""
+    st = Storage(os.path.join(tempfile.mkdtemp(), "p14.db"))
+    try:
+        sounds = []
+        svc, clock, wall, _, _, _ = make_service(
+            st, sound_cb=lambda name: sounds.append(name))
+
+        svc.start_focus(focus_minutes=5, break_minutes=3)
+        clock.advance(5 * 60)
+        wall.advance(5 * 60)
+        svc.tick()
+        assert sounds == ["focus_done"], sounds
+
+        svc.start_break(chain=False)
+        clock.advance(3 * 60)
+        wall.advance(3 * 60)
+        svc.tick()
+        assert sounds == ["focus_done", "break_done"], sounds
+
+        # 手动中止不发声：用户自己点的，不需要提醒
+        sounds.clear()
+        svc.start_focus(focus_minutes=5, break_minutes=3)
+        svc.stop()
+        assert sounds == [], sounds
+
+        # 关闭开关后到点不响
+        st.set_setting("pomodoro.sound", "0")
+        svc.start_focus(focus_minutes=5, break_minutes=3)
+        clock.advance(5 * 60)
+        wall.advance(5 * 60)
+        svc.tick()
+        assert sounds == [], sounds
+        print("完成/休息各响一次，中止与关闭不响 OK")
+
+        # 重新打开
+        st.set_setting("pomodoro.sound", "1")
+        assert st.pomodoro_config()["sound"] is True
+        st.set_pomodoro_config(sound=False)
+        assert st.pomodoro_config()["sound"] is False
+        st.set_pomodoro_config(sound="false")
+        assert st.pomodoro_config()["sound"] is False
+        st.set_pomodoro_config(sound=True)
+        assert st.pomodoro_config()["sound"] is True
+        print("提示音开关读写 / 字符串兼容 OK")
+    finally:
+        st.close()
+
+
 def test_guards_do_not_deadlock():
     """错误状态下调控制方法必须立即返回。
 
@@ -319,7 +369,8 @@ def test_set_config_updates_memory():
     try:
         svc, _, _, _, _, _ = make_service(st)
         cfg = svc.set_config(45, 8)
-        assert cfg == {"focus_minutes": 45, "break_minutes": 8}, cfg
+        assert cfg["focus_minutes"] == 45 and cfg["break_minutes"] == 8, cfg
+        assert cfg["sound"] is True, cfg
         assert st.pomodoro_config() == cfg
         s = svc.start_focus()            # 不传时长 → 用刚改的默认值
         assert s["planned_ms"] == 45 * 60000, s
@@ -414,6 +465,7 @@ if __name__ == "__main__":
     test_complete_and_report()
     test_chain_break_then_auto_focus()
     test_next_round_skips_break()
+    test_sound_on_finish()
     test_guards_do_not_deadlock()
     test_rest_only_returns_to_setup()
     test_set_config_updates_memory()

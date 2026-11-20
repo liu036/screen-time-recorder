@@ -17,6 +17,7 @@ import time
 
 from . import config
 from .focus_report import build_report
+from .sound import play as play_sound
 
 
 def _clamp(v, lo, hi):
@@ -41,7 +42,7 @@ class PomodoroService(threading.Thread):
     """focus / paused / focus_done / break / idle 五态。"""
 
     def __init__(self, storage, notifier=None, state_cb=None,
-                 lock_getter=None, popup_cb=None,
+                 lock_getter=None, popup_cb=None, sound_cb=None,
                  clock=None, wall_ms=None, tick_ms=None):
         """
         storage:      Storage
@@ -58,6 +59,7 @@ class PomodoroService(threading.Thread):
         self.popup_cb = popup_cb
         self.state_cb = state_cb
         self.lock_getter = lock_getter or (lambda: 0)
+        self.sound_cb = sound_cb or play_sound
         self.clock = clock or time.monotonic
         self.wall_ms = wall_ms or (lambda: int(time.time() * 1000))
         self.interval = (tick_ms or config.POMODORO_TICK_MS) / 1000.0
@@ -334,8 +336,8 @@ class PomodoroService(threading.Thread):
             self._last_state = "idle"
         return self.start_focus(**nxt)
 
-    def set_config(self, focus_minutes=None, break_minutes=None):
-        """更新默认时长（设置面板改了就立即生效，不必等下一次 start）。"""
+    def set_config(self, focus_minutes=None, break_minutes=None, sound=None):
+        """更新默认时长/提示音（设置面板改了就立即生效）。"""
         with self._lock:
             fm = _clamp(focus_minutes if focus_minutes is not None
                         else self._focus_minutes,
@@ -345,11 +347,12 @@ class PomodoroService(threading.Thread):
                         config.POMODORO_BREAK_MIN, config.POMODORO_BREAK_MAX)
             self._focus_minutes, self._break_minutes = fm, bm
         try:
-            self.storage.set_pomodoro_config(fm, bm)
+            cfg = self.storage.set_pomodoro_config(fm, bm, sound)
         except Exception:
-            pass
+            cfg = {"focus_minutes": fm, "break_minutes": bm,
+                   "sound": self._sound_enabled()}
         self._emit_state()
-        return {"focus_minutes": fm, "break_minutes": bm}
+        return cfg
 
     def skip_break(self):
         """跳过休息 / 结束 focus_done，回到空闲（不会自动开下一轮）。"""
@@ -379,7 +382,8 @@ class PomodoroService(threading.Thread):
 
     def _status_locked(self):
         cfg = {"focus_minutes": self._focus_minutes,
-               "break_minutes": self._break_minutes}
+               "break_minutes": self._break_minutes,
+               "sound": self._sound_enabled()}
         out = {
             "state": self._state,
             "server_ms": self.wall_ms(),
@@ -609,10 +613,27 @@ class PomodoroService(threading.Thread):
         except Exception:
             pass
 
+    def _sound_enabled(self):
+        try:
+            return self.storage.get_setting("pomodoro.sound", "1") != "0"
+        except Exception:
+            return True
+
     def _announce(self, title, body, kind=None):
-        """气泡必发；kind 非空时额外拉起置顶提醒小窗。"""
+        """气泡必发；kind 非空时额外播放提示音 + 拉起置顶提醒小窗。
+
+        只在这里发声：_notify 在“开始专注”时也会调用，挂上去会变成开始也响。
+        """
         self._notify(title, body)
-        if not kind or not self.popup_cb:
+        if not kind:
+            return
+        if self._sound_enabled():
+            try:
+                self.sound_cb("focus_done" if kind == "focus_done"
+                              else "break_done")
+            except Exception as e:
+                print("[pomodoro] 提示音失败: %s" % e)
+        if not self.popup_cb:
             return
         try:
             self.popup_cb(kind, title, body)

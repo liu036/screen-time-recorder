@@ -46,17 +46,28 @@ def main():
     assert r.status_code == 200, r.data
     body = r.get_json()
     assert body["state"] == "idle"
-    assert body["config"] == {"focus_minutes": 25, "break_minutes": 5}, body
+    assert body["config"]["focus_minutes"] == 25, body
+    assert body["config"]["break_minutes"] == 5, body
+    assert body["config"]["sound"] is True, body
     print("GET /api/pomodoro 初始状态 OK")
 
     r = c.put("/api/settings/pomodoro",
               json={"focus_minutes": 50, "break_minutes": 10})
     assert r.status_code == 200
-    assert r.get_json() == {"focus_minutes": 50, "break_minutes": 10}
+    cfg = r.get_json()
+    assert cfg["focus_minutes"] == 50 and cfg["break_minutes"] == 10, cfg
     r = c.put("/api/settings/pomodoro",
               json={"focus_minutes": 999, "break_minutes": -5})
-    assert r.get_json() == {"focus_minutes": 180, "break_minutes": 0}
+    cfg = r.get_json()
+    assert cfg["focus_minutes"] == 180 and cfg["break_minutes"] == 0, cfg
     print("GET/PUT /api/settings/pomodoro 夹紧 OK")
+
+    r = c.put("/api/settings/pomodoro", json={"sound": False})
+    assert r.status_code == 200 and r.get_json()["sound"] is False
+    assert c.get("/api/pomodoro").get_json()["config"]["sound"] is False
+    r = c.put("/api/settings/pomodoro", json={"sound": True})
+    assert r.get_json()["sound"] is True
+    print("提示音开关写库 / 状态同步 OK")
 
     r = c.post("/api/pomodoro/start",
                json={"focus_minutes": 50, "break_minutes": 10,

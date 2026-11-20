@@ -515,10 +515,12 @@ class Storage:
                                   config.POMODORO_DEFAULT_FOCUS_MIN),
             "break_minutes": _int("pomodoro.break_minutes",
                                   config.POMODORO_DEFAULT_BREAK_MIN),
+            "sound": self.get_setting("pomodoro.sound", "1") != "0",
         }
 
-    def set_pomodoro_config(self, focus_minutes=None, break_minutes=None):
-        """保存时长（自动夹到合法范围），返回保存后的完整配置。"""
+    def set_pomodoro_config(self, focus_minutes=None, break_minutes=None,
+                            sound=None):
+        """保存时长/提示音开关，返回保存后的完整配置。"""
         if focus_minutes is not None:
             fm = max(config.POMODORO_FOCUS_MIN,
                      min(config.POMODORO_FOCUS_MAX, int(focus_minutes)))
@@ -527,6 +529,11 @@ class Storage:
             bm = max(config.POMODORO_BREAK_MIN,
                      min(config.POMODORO_BREAK_MAX, int(break_minutes)))
             self.set_setting("pomodoro.break_minutes", bm)
+        if sound is not None:
+            # 兼容 "false"/"0"/"off" 这类字符串（前端传布尔，但 API 手调可能传串）
+            if isinstance(sound, str):
+                sound = sound.strip().lower() not in ("", "0", "false", "off")
+            self.set_setting("pomodoro.sound", "1" if sound else "0")
         return self.pomodoro_config()
 
     def add_pomodoro_session(self, kind, planned_ms, todo_id=None,
