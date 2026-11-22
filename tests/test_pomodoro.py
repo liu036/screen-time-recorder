@@ -42,11 +42,10 @@ class FakeWall:
 def make_service(st, lock_val=None, sound_cb=None):
     clock, wall = FakeClock(), FakeWall()
     notes = []          # 番茄钟已不发托盘气泡，保留空列表以兼容解构
-    popups = []
+    popups = []         # 提醒小窗也已取消，保留以断言"没有弹窗"
     lock = lock_val if lock_val is not None else {"v": 0}
     svc = PomodoroService(
         st, lock_getter=lambda: lock["v"],
-        popup_cb=lambda kind, t, b: popups.append((kind, t, b)),
         sound_cb=sound_cb or (lambda name: None),
         clock=clock, wall_ms=wall, tick_ms=1000)
     svc.test_popups = popups
@@ -176,7 +175,7 @@ def test_complete_and_report():
         assert report["rate"] is not None and report["rate"] > 0.8, report
         assert report["work_ms"] > 0 and report["fun_ms"] > 0
         assert notes == [], "结束不应再弹托盘气泡"
-        assert any(p[0] == "focus_done" for p in svc.test_popups)
+        assert svc.test_popups == [], "结束不应再弹置顶小窗"
 
         # 开始休息
         s = svc.start_break()
@@ -185,7 +184,7 @@ def test_complete_and_report():
         wall.advance(10 * 60)
         svc.tick()
         assert svc.status()["state"] == "idle"
-        assert any(p[0] == "break_done" for p in svc.test_popups)
+        assert svc.test_popups == []
         print("到点 / 报告 / 休息 / 回空闲 OK")
     finally:
         st.close()
@@ -206,13 +205,12 @@ def test_chain_break_then_auto_focus():
         assert s["state"] == "focus_done", s
         assert s["next_round"]["todo_id"] == tid, s["next_round"]
         assert s["next_round"]["focus_minutes"] == 5
-        assert any(p[0] == "focus_done" for p in svc.test_popups), \
-            "专注结束应拉起提醒窗"
+        assert svc.test_popups == [], "不应再拉起提醒窗"
 
         svc.start_break(chain=True)
         s = svc.status()
         assert s["state"] == "break" and s["chain_next"] is True, s
-        assert any(p[0] == "focus_done" for p in svc.test_popups)
+        assert svc.test_popups == []
 
         clock.advance(2 * 60)
         wall.advance(2 * 60)
@@ -222,8 +220,7 @@ def test_chain_break_then_auto_focus():
         assert s["todo_id"] == tid and s["title"] == "写周报", s
         assert s["planned_ms"] == 5 * 60000
         assert s["chain_next"] is False
-        assert any(p[0] == "break_done" for p in svc.test_popups), \
-            "休息结束应有轻提示"
+        assert svc.test_popups == [], "休息结束也不弹窗"
         print("连续番茄：休息后自动接下一轮 / 继承待办 OK")
     finally:
         st.close()

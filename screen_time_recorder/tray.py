@@ -383,28 +383,6 @@ class TrayApp:
         if self.pomodoro:
             self.pomodoro.stop("manual")
 
-    def _popup(self, kind, title, body):
-        """拉起置顶提醒小窗。
-
-        必须是独立进程：本进程主线程被 PumpMessages() 占着，不能跑 Tk mainloop。
-        用 pythonw 启动，避免闪控制台。
-        """
-        exe = sys.executable
-        if exe.lower().endswith("python.exe"):
-            cand = exe[:-len("python.exe")] + "pythonw.exe"
-            if os.path.exists(cand):
-                exe = cand
-        env = os.environ.copy()
-        env["STR_API"] = self._web_url or "http://127.0.0.1:8765"
-        try:
-            subprocess.Popen(
-                [exe, "-m", "screen_time_recorder.pomodoro_popup",
-                 "--kind", kind],
-                cwd=BASE_DIR, env=env,
-                creationflags=0x00000008)      # DETACHED_PROCESS
-        except Exception as e:
-            print(f"[tray] 提醒窗启动失败（{kind}）: {e}")
-
     def _on_pomodoro_state(self, st):
         """番茄钟状态回调：刷新托盘提示（每 5s 一次，避免频繁 NIM_MODIFY）。"""
         try:
@@ -515,8 +493,7 @@ class TrayApp:
             self.pomodoro = PomodoroService(
                 self.daemon.storage,
                 state_cb=self._on_pomodoro_state,
-                lock_getter=lambda: self.daemon.collector.lock_state,
-                popup_cb=self._popup)
+                lock_getter=lambda: self.daemon.collector.lock_state)
         except Exception as e:
             print(f"[tray] 番茄钟服务初始化失败: {e}")
         # 本地仪表盘（127.0.0.1:8765），随采集器常驻

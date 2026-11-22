@@ -5,7 +5,6 @@
 """
 import ctypes
 import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -99,13 +98,6 @@ def shot(name, region):
         return None
 
 
-def work_area():
-    from ctypes import wintypes
-    r = wintypes.RECT()
-    ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)
-    return r.left, r.top, r.right, r.bottom
-
-
 def main():
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -194,23 +186,6 @@ def main():
     w, h = ui.root.winfo_width(), ui.root.winfo_height()
     shot("_pomo_inline.png", (x, y, x + w, y + h))
 
-    # 拉起真实提醒弹窗并截图
-    exe = sys.executable
-    if exe.lower().endswith("python.exe"):
-        cand = exe[:-len("python.exe")] + "pythonw.exe"
-        if os.path.exists(cand):
-            exe = cand
-    env = os.environ.copy()
-    env["STR_API"] = API
-    proc = subprocess.Popen(
-        [exe, "-m", "screen_time_recorder.pomodoro_popup",
-         "--kind", "focus_done"],
-        cwd=BASE_DIR, env=env, creationflags=0x00000008)
-    time.sleep(2.0)
-    left, top, right, bottom = work_area()
-    shot("_pomo_popup.png", (right - 420, bottom - 240, right, bottom))
-    proc.terminate()
-
     # 点「休息并继续」→ 休息 → 自动下一轮
     svc.start_break(chain=True)
     assert svc.status()["state"] == "break"
@@ -226,16 +201,6 @@ def main():
     assert s["state"] == "focus", s
     assert s["todo_id"] == expect_id and s["title"] == expect_title, s
     print("休息结束 → 自动接下一轮 / 继承待办 OK")
-
-    # 休息结束轻提示（此时下一轮已在跑，文案应读当前会话）
-    proc = subprocess.Popen(
-        [exe, "-m", "screen_time_recorder.pomodoro_popup",
-         "--kind", "break_done"],
-        cwd=BASE_DIR, env=env, creationflags=0x00000008)
-    time.sleep(2.0)
-    left, top, right, bottom = work_area()
-    shot("_pomo_popup_break.png", (right - 420, bottom - 240, right, bottom))
-    proc.terminate()
 
     # 专注中点另一条待办：确认后中断旧会话，并进入新任务的时长设置
     other_row = None

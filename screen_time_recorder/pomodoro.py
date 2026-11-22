@@ -42,7 +42,7 @@ class PomodoroService(threading.Thread):
     """focus / paused / focus_done / break / idle 五态。"""
 
     def __init__(self, storage, state_cb=None,
-                 lock_getter=None, popup_cb=None, sound_cb=None,
+                 lock_getter=None, sound_cb=None,
                  clock=None, wall_ms=None, tick_ms=None):
         """
         storage:      Storage
@@ -55,7 +55,6 @@ class PomodoroService(threading.Thread):
         """
         super().__init__(daemon=True, name="pomodoro")
         self.storage = storage
-        self.popup_cb = popup_cb
         self.state_cb = state_cb
         self.lock_getter = lock_getter or (lambda: 0)
         self.sound_cb = sound_cb or play_sound
@@ -610,27 +609,19 @@ class PomodoroService(threading.Thread):
         except Exception:
             return True
 
-    def _announce(self, title, body, kind=None):
-        """番茄钟不再发托盘气泡：kind 非空时播放提示音 + 拉起置顶小窗。
+    def _announce(self, _title="", _body="", kind=None):
+        """结束事件只播提示音：气泡和 Tk 小窗都已取消。
 
-        气泡和 Tk 小窗同时在右下角弹出，视觉上是两个重复的窗口；
-        现在只留可操作的那个（小窗），锁屏暂停等 kind=None 的提示
-        只体现在托盘 tooltip 上。
+        参数 title/body 保留只是为了兼容 tick 里的 `_announce(*notify)`。
+        可操作入口仍在：待办窗口底部的番茄面板、托盘右键菜单。
         """
-        if not kind:
-            return
-        if self._sound_enabled():
-            try:
-                self.sound_cb("focus_done" if kind == "focus_done"
-                              else "break_done")
-            except Exception as e:
-                print("[pomodoro] 提示音失败: %s" % e)
-        if not self.popup_cb:
+        if not kind or not self._sound_enabled():
             return
         try:
-            self.popup_cb(kind, title, body)
+            self.sound_cb("focus_done" if kind == "focus_done"
+                          else "break_done")
         except Exception as e:
-            print("[pomodoro] 提醒窗拉起失败: %s" % e)
+            print("[pomodoro] 提示音失败: %s" % e)
 
     def _emit_state(self):
         if not self.state_cb:
