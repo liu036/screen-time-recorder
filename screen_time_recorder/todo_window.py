@@ -718,7 +718,10 @@ class TodoApp(PomodoroPanelMixin):
         e.place(x=0, y=-3, width=max(120, w), height=30)
         e.focus_set()
         self._edit_entry = e
-        state = {"done": False, "pending": None}
+        # focused：窗口未激活时 focus_set() 可能拿不到焦点，此时 Tk 仍可能
+        # 补一个 FocusOut。没有真正进入过编辑态就不该自动提交，否则输入框
+        # 会在 80ms 后被悄悄关闭（测试里表现为"编辑期间列表被重建"）。
+        state = {"done": False, "pending": None, "focused": False}
 
         def cancel_pending():
             if state["pending"] is not None:
@@ -754,7 +757,7 @@ class TodoApp(PomodoroPanelMixin):
 
         def on_focus_out(_ev):
             # 延迟 80ms：避免点击瞬间焦点抖动把输入框立刻提交掉
-            if state["done"]:
+            if state["done"] or not state["focused"]:
                 return
             cancel_pending()
             state["pending"] = self.root.after(80, lambda: commit(True))
@@ -763,7 +766,12 @@ class TodoApp(PomodoroPanelMixin):
         e.bind("<Return>", lambda ev: commit(True))
         e.bind("<Escape>", lambda ev: commit(False))
         e.bind("<FocusOut>", on_focus_out)
-        e.bind("<FocusIn>", lambda ev: cancel_pending())
+
+        def on_focus_in(_ev):
+            cancel_pending()
+            state["focused"] = True
+
+        e.bind("<FocusIn>", on_focus_in)
 
     def _cycle_priority(self, item, canvas, oval):
         """点击优先级圆点：低 → 中 → 高(红) → 低，局部改色 + 后台写库。"""
