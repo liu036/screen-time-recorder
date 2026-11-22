@@ -37,7 +37,8 @@ def build_report(storage, start_ts, end_ts, focused_ms):
 
     total = sum(by_app.values())
     work = by_cat.get("工作", 0)
-    fun = by_cat.get("娱乐", 0)
+    # 影音（B 站/抖音等）也是消遣，不并进来会让专注报告少算一大块
+    fun = by_cat.get("娱乐", 0) + by_cat.get("影音", 0)
     out["total_ms"] = total
     out["work_ms"] = work
     out["fun_ms"] = fun

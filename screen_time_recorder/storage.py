@@ -182,15 +182,22 @@ class Storage:
                 self._conn.execute("ALTER TABLE events ADD COLUMN content_title TEXT")
 
     def _seed_rules(self):
+        """写入默认规则；老库升级时补齐缺失项（按 match_field+pattern 去重）。
+
+        只补不改：用户改过分类的规则 pattern 没变，不会被覆盖。
+        """
         with self._conn:
-            n = self._conn.execute("SELECT COUNT(*) FROM category_rules").fetchone()[0]
-            if n == 0:
-                self._conn.executemany(
+            existing = {
+                (r[0], r[1]) for r in self._conn.execute(
+                    "SELECT match_field, pattern FROM category_rules")
+            }
+            for rule in config.DEFAULT_CATEGORY_RULES:
+                if (rule[0], rule[1]) in existing:
+                    continue
+                self._conn.execute(
                     "INSERT INTO category_rules "
                     "(match_field,pattern,category,sub_category,productivity,priority) "
-                    "VALUES (?,?,?,?,?,?)",
-                    config.DEFAULT_CATEGORY_RULES,
-                )
+                    "VALUES (?,?,?,?,?,?)", rule)
 
     # ---------- 应用归一化（apps 去重）----------
     def ensure_app(self, process_name, exe_path=None, app_name=None, cls=None):
@@ -321,7 +328,7 @@ class Storage:
         with self._lock:
             return self._conn.execute(
                 "SELECT id,match_field,pattern,category,sub_category,productivity,priority "
-                "FROM category_rules ORDER BY priority DESC"
+                "FROM category_rules ORDER BY priority DESC, id ASC"
             ).fetchall()
 
     def ts_range(self):

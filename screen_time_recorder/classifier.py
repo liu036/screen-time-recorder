@@ -33,6 +33,25 @@ BROWSER_NOISE_RE = re.compile(
     r"(上次播放至[：:].*$|^视频加载中.*$|^播放中$|^加载中.*$)")
 
 
+NOTE_TITLE_RE = re.compile(
+    r"\s+[—–-]\s+(Obsidian|Notion|Typora|Logseq)\b.*$", re.IGNORECASE)
+NOTE_APP_NAMES = {"obsidian", "notion", "typora", "logseq"}
+
+
+def clean_note_title(title):
+    """从笔记类窗口标题里取文件名。
+
+    Obsidian 的标题是「笔记名 - 库名 - Obsidian」或「笔记名 - Obsidian」。
+    去掉应用后缀后保留「笔记名 - 库名」：库名是固定的，按笔记分组不受影响，
+    也避免把笔记名里自带的 " - " 误切掉。
+
+    纯应用名（窗口刚打开、没有笔记）返回空串，避免内容明细里出现
+    一堆无意义的「Obsidian」条目。
+    """
+    t = NOTE_TITLE_RE.sub("", (title or "").strip()).strip()
+    return "" if t.lower() in NOTE_APP_NAMES else t
+
+
 def clean_browser_title(title):
     """从窗口标题中解析页面标题；首页/播放器噪音/空标题返回空串。"""
     t = BROWSER_SUFFIX_RE.sub("", (title or "").strip()).strip()
@@ -179,6 +198,8 @@ class ActivityService:
             ct = content_title
             if not ct and _proc.lower() in BROWSER_PROCS:
                 ct = clean_browser_title(title)
+            elif not ct and _proc.lower() in config.NOTE_PROCS:
+                ct = clean_note_title(title)
             end = bounds[i + 1][0] if i + 1 < n else to_ts
             end = min(end, to_ts)
             # 断档修正：休眠/离开/关机时心跳会缺失。长段用区间内最后一条心跳截断，
@@ -196,6 +217,7 @@ class ActivityService:
                 segs.append({
                     "start": a, "end": b, "orig_start": ts,
                     "app_id": app_id, "app_name": app_name,
+                    "process_name": _proc,
                     "title": title, "is_afk": bool(is_afk),
                     "content_title": ct, "edited": (a, b) != (ts, end),
                 })
@@ -205,9 +227,15 @@ class ActivityService:
         #   但 <1 分钟的内容不进入"内容明细"（见 aggregate 的 by_content 过滤）。
         merged = []
         for s in segs:
+            if s["end"] <= s["start"]:
+                continue                  # 同一毫秒的边界事件，无时长
             if s.get("content_title"):
                 merged.append(s)
             elif s["end"] - s["start"] >= config.MIN_ACTIVITY_DURATION_MS:
+                merged.append(s)
+            elif (s.get("process_name") or "").lower() in config.NOTE_PROCS:
+                # 笔记类豁免：频繁切笔记会产生大量 <1 分钟的段，
+                # 直接丢掉会让 Obsidian 的总时长凭空少一截。
                 merged.append(s)
         # AFK 标记（基于 heartbeat idle 序列）：段内心跳多数 idle 超阈值才判定，
         # 避免把"看视频不操作"误判为离开。专注口径排除这些段，前台口径保留。

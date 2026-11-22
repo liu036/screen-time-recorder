@@ -101,13 +101,66 @@ def test_delete_range():
 
 
 def test_classify_with():
-    """规则分类：抖音 → 娱乐 / distracting。"""
+    """抖音：有标题走站点级规则（影音），空标题退回进程兜底（娱乐）。"""
     st = _new_storage()
     try:
         app = (1, "douyin.exe", None, "抖音", "Chrome_WidgetWin_1")
+        cat, sub, prod = classify_with(app, st.get_rules(), "抖音")
+        assert (cat, sub, prod) == ("影音", "短视频", "distracting")
         cat, _sub, prod = classify_with(app, st.get_rules(), "")
-        assert cat == "娱乐"
+        assert cat == "娱乐", "空标题应退回 process_name 兜底"
         assert prod == "distracting"
+    finally:
+        st.close()
+
+
+def test_title_level_rules():
+    """站点级规则：浏览器里的 B 站/抖音归「影音」，不再混进「浏览网页」。"""
+    st = _new_storage()
+    try:
+        rules = st.get_rules()
+        ff = (1, "firefox.exe", None, "Mozilla Firefox", "MozillaWindowClass")
+        cases = [
+            ("【硬核】一口气看完迷宫饭_哔哩哔哩_bilibili — Mozilla Firefox",
+             "影音", "长视频"),
+            ("抖音-记录美好生活 — Mozilla Firefox", "影音", "短视频"),
+            ("某技术文档 - Google Chrome", "浏览网页", "浏览器"),
+        ]
+        for title, cat, sub in cases:
+            c, s, _ = classify_with(ff, rules, title)
+            assert (c, s) == (cat, sub), (title, c, s)
+        print("站点级 title 规则（B站 / 抖音 / 普通网页）OK")
+    finally:
+        st.close()
+
+
+def test_note_title_and_short_segment():
+    """Obsidian：解析文件名 + 短段不被 1 分钟过滤丢掉。"""
+    st = _new_storage()
+    try:
+        from screen_time_recorder.classifier import clean_note_title
+        assert clean_note_title("周报 - 笔记库 - Obsidian 1.12.7") == "周报 - 笔记库"
+        assert clean_note_title("日报 - Obsidian") == "日报"
+        assert clean_note_title("Obsidian") == "", "纯应用名应清空"
+
+        app = st.ensure_app("Obsidian.exe", None, "Obsidian",
+                            "Chrome_WidgetWin_1")
+        base = 1_760_000_000_000
+        _insert(st, [
+            (base, "foreground", 1, app, "周报 - 笔记库 - Obsidian 1.12.7",
+             "", "", 0, 0, "", None),
+            (base + 30_000, "foreground", 1, app,
+             "日报 - 笔记库 - Obsidian 1.12.7", "", "", 0, 0, "", None),
+            (base + 60_000, "foreground", 0, None, "", "", "", 0, 0, "", None),
+        ])
+        segs = ActivityService(st).derive(base, base + 120_000)
+        obs = [s for s in segs
+               if (s.get("process_name") or "").lower() == "obsidian.exe"]
+        assert len(obs) == 2, [s["duration_ms"] for s in obs]
+        assert all(s["duration_ms"] == 30_000 for s in obs), \
+            [(s["duration_ms"]) for s in obs]
+        assert [s["content_title"] for s in obs] == ["周报 - 笔记库", "日报 - 笔记库"]
+        print("Obsidian 短段豁免（30 秒保留）+ 标题解析 OK")
     finally:
         st.close()
 
@@ -209,6 +262,8 @@ if __name__ == "__main__":
     test_short_segment_rules()
     test_delete_range()
     test_classify_with()
+    test_title_level_rules()
+    test_note_title_and_short_segment()
     test_browser_title_clean()
     test_afk_marking()
     test_edit_category_and_exclude()

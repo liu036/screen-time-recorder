@@ -110,19 +110,32 @@ CONTENT_FETCH_INTERVAL_MS = 5000  # 抖音前台时内容抓取的节流间隔�
 
 # ---------- 手动编辑（仪表盘改分类）----------
 # 可选分类 + 默认生产力映射（用户改分类时按此自动带出 productivity）
-CATEGORY_OPTIONS = ["工作", "浏览网页", "娱乐", "社交通讯", "系统", "未分类"]
+CATEGORY_OPTIONS = ["工作", "浏览网页", "影音", "娱乐", "社交通讯", "系统", "未分类"]
 CATEGORY_PRODUCTIVITY = {
     "工作": "productive",
     "浏览网页": "neutral",
+    # 影音单独成类：B 站/抖音网页版原本混在「浏览网页」里，
+    # 30 天数据里能占到两百多小时，混着算等于没统计。
+    "影音": "distracting",
     "娱乐": "distracting",
     "社交通讯": "neutral",
     "系统": "neutral",
     "未分类": "neutral",
 }
 
+# 笔记类应用：窗口标题里的文件名要解析成 content_title，
+# 并且豁免「不足 1 分钟丢弃」——频繁切笔记不应该让时长凭空消失。
+NOTE_PROCS = ("obsidian.exe", "notion.exe", "typora.exe", "logseq.exe")
+
 # 默认分类规则种子（classifier 首次运行时写入；可被用户编辑覆盖）
 DEFAULT_CATEGORY_RULES = [
     # match_field, pattern, category, sub_category, productivity, priority
+    # 站点级规则必须排在「浏览器」之前（priority 更高），否则浏览器里的
+    # B 站/抖音会先命中 process_name=chrome/firefox，被算成「浏览网页」。
+    ("title", r"(?i)bilibili|哔哩哔哩|b23\.tv", "影音", "长视频", "distracting", 20),
+    ("title", r"(?i)douyin|抖音", "影音", "短视频", "distracting", 20),
+    ("title", r"(?i)youtube|youtu\.be", "影音", "长视频", "distracting", 20),
+    ("title", r"(?i)腾讯视频|爱奇艺|iqiyi|优酷|youku|netflix", "影音", "长视频", "distracting", 20),
     ("process_name", r"(?i)WeChat|Weixin|Feishu|Lark|QQ|DingTalk", "社交通讯", "IM", "neutral", 10),
     ("process_name", r"(?i)chrome|msedge|firefox|brave", "浏览网页", "浏览器", "neutral", 5),
     ("process_name", r"(?i)Code|idea64|pycharm|studio64|devenv", "工作", "开发", "productive", 5),
